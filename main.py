@@ -210,7 +210,7 @@ def admin_login():
         password = request.form.get("password", "")
         if hmac.compare_digest(password, ADMIN_PASSWORD):
             session["is_admin"] = True
-            return redirect(url_for("admin_pos"))
+            return redirect(url_for("admin_dashboard"))
         error = "密码错误，默认密码为：123456"
     return render_template_string("""
     <div style="max-width:400px;margin:100px auto;padding:20px;border:1px solid #ccc;text-align:center;font-family:sans-serif;">
