@@ -605,13 +605,14 @@ ADMIN_APPOINTMENTS_TEMPLATE = """
         </div>
     </nav>
     <main class="container mx-auto p-6">
-        <div class="bg-white p-6 rounded-xl shadow-md">
+        <div class="bg-white p-6 rounded-xl shadow-md mb-6">
             <div class="flex flex-col md:flex-row justify-between items-start md:items-center mb-6 gap-4 border-b pb-4">
                 <h2 class="text-xl font-extrabold text-indigo-600">预约记录与时间轴管理</h2>
                 <div class="flex items-center gap-3">
                     <label class="text-sm font-bold text-gray-700">切换/筛选日期：</label>
                     <input type="date" id="admin_date_picker" value="{{ selected_date }}" class="border rounded-lg p-2 font-medium" onchange="changeAdminDate(this.value)">
                     <button onclick="changeAdminDate('{{ today_str }}')" class="bg-gray-200 hover:bg-gray-300 text-gray-800 px-3 py-2 rounded-lg text-sm font-bold">今天</button>
+                    <button onclick="openAdminBookModal()" class="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-lg text-sm font-bold shadow">+ 手动代客预约</button>
                 </div>
             </div>
 
@@ -673,9 +674,94 @@ ADMIN_APPOINTMENTS_TEMPLATE = """
             </div>
         </div>
     </main>
+
+    <!-- 后台代客预约弹窗 -->
+    <div id="adminBookModal" class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 hidden">
+        <div class="bg-white p-6 rounded-xl shadow-xl max-w-lg w-full max-h-[90vh] overflow-y-auto">
+            <div class="flex justify-between items-center mb-4 border-b pb-2">
+                <h3 class="text-lg font-bold text-indigo-600">后台手动代客预约</h3>
+                <button onclick="closeAdminBookModal()" class="text-gray-500 font-bold text-xl">&times;</button>
+            </div>
+            {% if error %}
+            <div class="mb-4 p-3 bg-red-100 text-red-700 rounded text-sm font-bold">{{ error }}</div>
+            {% endif %}
+            <form action="/admin/appointment/add" method="POST">
+                <div class="mb-3">
+                    <label class="block text-sm font-bold mb-1">选择已有会员 (可选)</label>
+                    <select name="customer_id" onchange="fillAdminCustomer(this)" class="w-full border rounded p-2 text-sm">
+                        <option value="">-- 手动输入新客信息 --</option>
+                        {% for c in customers %}
+                        <option value="{{ c.id }}" data-name="{{ c.name }}" data-phone="{{ c.phone }}">{{ c.name }} ({{ c.phone }})</option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div class="grid grid-cols-2 gap-3 mb-3">
+                    <div>
+                        <label class="block text-sm font-bold mb-1">顾客姓名</label>
+                        <input type="text" name="customer_name" id="admin_cust_name" class="w-full border rounded p-2 text-sm" required>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-bold mb-1">顾客电话</label>
+                        <input type="text" name="customer_phone" id="admin_cust_phone" class="w-full border rounded p-2 text-sm" required>
+                    </div>
+                </div>
+                <div class="mb-3">
+                    <label class="block text-sm font-bold mb-1">选择服务项目</label>
+                    <select name="service_id" class="w-full border rounded p-2 text-sm" required>
+                        {% for s in services %}
+                        <option value="{{ s.id }}">{{ s.name }} (RM {{ "%.2f"|format(s.price) }} / {{ s.duration }}分钟)</option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div class="mb-3">
+                    <label class="block text-sm font-bold mb-1">选择发型师</label>
+                    <select name="stylist" class="w-full border rounded p-2 text-sm" required>
+                        {% for st in stylists %}
+                        <option value="{{ st.name }} ({{ st.title }})">{{ st.name }} ({{ st.title }})</option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div class="grid grid-cols-2 gap-3 mb-4">
+                    <div>
+                        <label class="block text-sm font-bold mb-1">预约日期</label>
+                        <input type="date" name="booking_date" value="{{ selected_date }}" class="w-full border rounded p-2 text-sm" required>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-bold mb-1">预约时间段</label>
+                        <select name="booking_time" class="w-full border rounded p-2 text-sm" required>
+                            {% for t in timeslots %}
+                            <option value="{{ t }}">{{ t }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                </div>
+                <div class="flex justify-end gap-2">
+                    <button type="button" onclick="closeAdminBookModal()" class="bg-gray-300 px-4 py-2 rounded text-sm font-bold">取消</button>
+                    <button type="submit" class="bg-indigo-600 text-white px-4 py-2 rounded text-sm font-bold hover:bg-indigo-700">确认添加预约</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
     <script>
         function changeAdminDate(dateStr) {
             window.location.href = "/admin/appointments?date=" + dateStr;
+        }
+        function openAdminBookModal() {
+            document.getElementById('adminBookModal').classList.remove('hidden');
+        }
+        function closeAdminBookModal() {
+            document.getElementById('adminBookModal').classList.add('hidden');
+        }
+        function fillAdminCustomer(sel) {
+            const opt = sel.options[sel.selectedIndex];
+            if(opt.value) {
+                document.getElementById('admin_cust_name').value = opt.getAttribute('data-name');
+                document.getElementById('admin_cust_phone').value = opt.getAttribute('data-phone');
+            } else {
+                document.getElementById('admin_cust_name').value = '';
+                document.getElementById('admin_cust_phone').value = '';
+            }
         }
     </script>
 </body>
@@ -688,7 +774,6 @@ def admin_appointments():
     selected_date = request.args.get("date", datetime.now().strftime("%Y-%m-%d"))
     today_str = datetime.now().strftime("%Y-%m-%d")
     
-    # 构造前后 15 天的滑动条数据
     date_strip = []
     base_dt = datetime.strptime(selected_date, "%Y-%m-%d")
     start_loop = base_dt - timedelta(days=5)
@@ -698,13 +783,11 @@ def admin_appointments():
             d = start_loop + timedelta(days=i)
             d_str = d.strftime("%Y-%m-%d")
             
-            # 计算星期几
             wd_map = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
             wd_str = wd_map[d.weekday()]
             if d_str == today_str:
                 wd_str = "今天"
                 
-            # 统计当日预约数量
             cnt = conn.execute("SELECT COUNT(*) FROM appointments WHERE start_time LIKE ? AND status = 'CONFIRMED'", (f"{d_str}%",)).fetchone()[0]
             
             date_strip.append({
@@ -723,13 +806,76 @@ def admin_appointments():
             ORDER BY a.start_time ASC
         """, (f"{selected_date}%",)).fetchall()
         
+        services = conn.execute("SELECT * FROM services WHERE category_type != 'Packages'").fetchall()
+        stylists = conn.execute("SELECT * FROM stylists").fetchall()
+        customers = conn.execute("SELECT * FROM customers").fetchall()
+        
+        open_time_str = get_setting("open_time", "10:00")
+        close_time_str = get_setting("close_time", "20:00")
+        timeslots = []
+        st = datetime.strptime(open_time_str, "%H:%M")
+        et = datetime.strptime(close_time_str, "%H:%M")
+        while st <= et:
+            timeslots.append(st.strftime("%H:%M"))
+            st += timedelta(minutes=30)
+        
     return render_template_string(
         ADMIN_APPOINTMENTS_TEMPLATE, 
         appointments=appointments, 
         date_strip=date_strip, 
         selected_date=selected_date, 
-        today_str=today_str
+        today_str=today_str,
+        services=services,
+        stylists=stylists,
+        customers=customers,
+        timeslots=timeslots,
+        error=None
     )
+
+@app.route("/admin/appointment/add", methods=["POST"])
+@admin_required
+def admin_add_appointment():
+    service_id = request.form.get("service_id")
+    stylist = request.form.get("stylist")
+    b_date = request.form.get("booking_date")
+    b_time = request.form.get("booking_time")
+    c_name = request.form.get("customer_name")
+    c_phone = request.form.get("customer_phone")
+    
+    with get_db() as conn:
+        srv = conn.execute("SELECT duration FROM services WHERE id = ?", (service_id,)).fetchone()
+        duration = srv["duration"] if srv else 30
+        
+        start_dt = datetime.strptime(f"{b_date} {b_time}", "%Y-%m-%d %H:%M")
+        end_dt = start_dt + timedelta(minutes=duration)
+        start_str = start_dt.strftime("%Y-%m-%d %H:%M")
+        end_str = end_dt.strftime("%Y-%m-%d %H:%M")
+        
+        conflict = conn.execute("""
+            SELECT id FROM appointments 
+            WHERE stylist = ? AND status = 'CONFIRMED' 
+            AND start_time < ? AND end_time > ?
+        """, (stylist, end_str, start_str)).fetchone()
+        
+        if conflict:
+            return f"<script>alert('预约失败：发型师在该时间段已有冲突！'); window.history.back();</script>"
+
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM customers WHERE phone = ?", (c_phone,))
+        cust = cursor.fetchone()
+        if not cust:
+            token = secrets.token_hex(8)
+            cursor.execute("INSERT INTO customers (name, phone, token) VALUES (?, ?, ?)", (c_name, c_phone, token))
+            cust_id = cursor.lastrowid
+        else:
+            cust_id = cust["id"]
+            
+        cursor.execute("""
+            INSERT INTO appointments (customer_id, service_id, stylist, start_time, end_time)
+            VALUES (?, ?, ?, ?, ?)
+        """, (cust_id, service_id, stylist, start_str, end_str))
+        
+    return redirect(url_for("admin_appointments", date=b_date))
 
 @app.route("/admin/appointment/delete/<int:id>")
 @admin_required
@@ -1065,7 +1211,6 @@ BOOKING_CALENDAR_TEMPLATE = """
         </form>
     </div>
     <script>
-        // 时间段高亮
         const timeLabels = document.querySelectorAll('input[name="booking_time"]');
         timeLabels.forEach(input => {
             input.addEventListener('change', function() {
@@ -1080,7 +1225,6 @@ BOOKING_CALENDAR_TEMPLATE = """
             });
         });
 
-        // 联动日期卡片点击与输入框
         function selectDateCard(dateStr) {
             document.getElementById('booking_date').value = dateStr;
             document.querySelectorAll('.date-card').forEach(card => {
@@ -1192,7 +1336,6 @@ def public_booking_render(error=None):
     today_str = datetime.now().strftime("%Y-%m-%d")
     selected_date = request.args.get("date", today_str)
     
-    # 构造顾客端左右滑动日期条（未来14天）
     date_strip = []
     base_dt = datetime.now()
     wd_map = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
