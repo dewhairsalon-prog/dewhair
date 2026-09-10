@@ -1023,6 +1023,143 @@ def admin_reports():
             </div>
         </div>
     """))
+# ==================== 新增：顾客在线预约专属路由 ====================
 
+
+@app.route("/book", methods=["GET", "POST"])
+def customer_public_booking():
+  if request.method == "POST":
+    name = request.form.get("name")
+    phone = request.form.get("phone")
+    service_name = request.form.get("service_name")
+    date_time = request.form.get("date_time")
+
+    if not name or not phone or not service_name or not date_time:
+      flash("请完整填写所有预约信息！")
+      return redirect(url_for("customer_public_booking"))
+
+    try:
+      import uuid
+
+      if "conn" in globals():
+        conn.execute(
+            "INSERT INTO appointments (id, customer_name, phone, service,"
+            " date_time, status) VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                str(uuid.uuid4())[:8],
+                name,
+                phone,
+                service_name,
+                date_time,
+                "已预约",
+            ),
+        )
+        conn.commit()
+    except Exception as e:
+      print("写入预约数据库提示:", e)
+
+    return render_template_string(
+        """
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>预约成功 - Dew Hair Salon</title>
+            <meta charset="utf-8">
+            <style>
+                body { font-family: Arial; background: #f4f4f9; padding: 40px; text-align: center; }
+                .card { max-width: 400px; margin: auto; background: white; padding: 30px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
+                h2 { color: #28a745; }
+                p { color: #555; line-height: 1.6; }
+                a { display: inline-block; margin-top: 20px; color: #007bff; text-decoration: none; }
+            </style>
+        </head>
+        <body>
+            <div class="card">
+                <h2>🎉 预约提交成功！</h2>
+                <p>感谢您的预约，<b>{{ name }}</b>。我们已收到您的服务需求：<br><b>{{ service }}</b></p>
+                <p>预约时间：{{ date_time }}</p>
+                <p>期待您的光临！</p>
+                <a href="/book">再次预约</a>
+            </div>
+        </body>
+        </html>
+        """,
+        name=name,
+        service=service_name,
+        date_time=date_time,
+    )
+
+  services_list = [
+      {"name": "高级总监剪发", "price": 120.0},
+      {"name": "时尚染发", "price": 280.0},
+      {"name": "日系精细烫发", "price": 350.0},
+      {"name": "深层头皮护理", "price": 150.0},
+  ]
+  try:
+    if "conn" in globals():
+      cursor = conn.execute("SELECT name, price FROM services")
+      db_services = [{"name": row[0], "price": row[1]} for row in cursor]
+      if db_services:
+        services_list = db_services
+  except Exception:
+    pass
+
+  return render_template_string(
+      """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>在线预约 - Dew Hair Salon</title>
+        <meta charset="utf-8">
+        <style>
+            body { font-family: Arial; background: #f9f9fb; padding: 20px; }
+            .container { max-width: 450px; margin: auto; background: white; padding: 25px; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
+            h2 { text-align: center; color: #333; margin-bottom: 20px; }
+            .form-group { margin-bottom: 15px; }
+            label { display: block; margin-bottom: 5px; color: #555; font-weight: bold; }
+            input, select { width: 100%%; padding: 10px; border: 1px solid #ddd; border-radius: 4px; box-sizing: border-box; }
+            button { width: 100%%; background: #ff4757; color: white; border: none; padding: 12px; font-size: 16px; border-radius: 4px; cursor: pointer; margin-top: 10px; }
+            button:hover { background: #ff6b81; }
+            .flash { color: red; text-align: center; margin-bottom: 15px; font-size: 14px; }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h2>Dew Hair Salon 在线预约</h2>
+            {% with messages = get_flashed_messages() %}
+              {% if messages %}
+                <div class="flash">{{ messages[0] }}</div>
+              {% endif %}
+            {% endwith %}
+            <form method="POST">
+                <div class="form-group">
+                    <label>您的姓名：</label>
+                    <input type="text" name="name" required placeholder="请输入您的姓名">
+                </div>
+                <div class="form-group">
+                    <label>联系电话：</label>
+                    <input type="text" name="phone" required placeholder="请输入手机号码">
+                </div>
+                <div class="form-group">
+                    <label>选择美发服务（自动同步 POS）：</label>
+                    <select name="service_name" required>
+                        <option value="">-- 请选择您想要的服务 --</option>
+                        {% for s in services %}
+                        <option value="{{ s.name }} (RM {{ s.price }})">{{ s.name }} - RM {{ s.price }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>选择预约日期与时间：</label>
+                    <input type="datetime-local" name="date_time" required>
+                </div>
+                <button type="submit">立即提交预约</button>
+            </form>
+        </div>
+    </body>
+    </html>
+    """,
+      services=services_list,
+  )
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000, debug=False)
