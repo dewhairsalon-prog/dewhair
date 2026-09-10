@@ -11,16 +11,8 @@ from flask import (
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", secrets.token_hex(32))
-
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "123456")
 DB_NAME = "salon.db"
-
-CATEGORIES = {
-    "Services": ["剪发", "染发", "烫发", "护理", "头皮理疗", "造型/其他"],
-    "Products": ["洗护系列", "造型系列", "特别护理"],
-    "Packages": ["标准配套"],
-    "Discounts": ["活动折扣"]
-}
 
 def get_db():
     conn = sqlite3.connect(DB_NAME)
@@ -90,7 +82,7 @@ def init_db():
         """)
         conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('open_time', '10:00')")
         conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('close_time', '20:00')")
-
+        
         cursor = conn.cursor()
         cursor.execute("SELECT COUNT(*) FROM services")
         if cursor.fetchone()[0] == 0:
@@ -109,6 +101,8 @@ def init_db():
                 INSERT INTO services (name, category_type, sub_category, price, duration)
                 VALUES (?, ?, ?, ?, ?)
             """, sample_services)
+
+init_db()
 
 def admin_required(f):
     @wraps(f)
@@ -213,14 +207,14 @@ def admin_login():
             return redirect(url_for("admin_dashboard"))
         error = "密码错误，默认密码为：123456"
     return render_template_string("""
-    <div style="max-width:400px;margin:100px auto;padding:20px;border:1px solid #ccc;text-align:center;font-family:sans-serif;">
-        <h2>Dew Hair Salon 管理后台</h2>
-        {% if error %}<p style="color:red;">{{ error }}</p>{% endif %}
-        <form method="POST">
-            <input type="password" name="password" placeholder="密码 (默认: 123456)" style="width:100%;padding:10px;margin:10px 0;" required>
-            <button style="width:100%;padding:10px;background:indigo;color:white;border:none;">登录系统</button>
-        </form>
-    </div>
+        <div style="max-width:400px;margin:100px auto;padding:20px;border:1px solid #ccc;text-align:center;font-family:sans-serif;border-radius:8px;">
+            <h2>Dew Hair Salon 管理后台</h2>
+            {% if error %}<p style="color:red;">{{ error }}</p>{% endif %}
+            <form method="POST">
+                <input type="password" name="password" placeholder="密码 (默认: 123456)" style="width:100%;padding:10px;margin:10px 0;box-sizing:border-box;" required>
+                <button style="width:100%;padding:10px;background:#4f46e5;color:white;border:none;border-radius:4px;font-weight:bold;cursor:pointer;">登录系统</button>
+            </form>
+        </div>
     """, error=error)
 
 @app.route("/admin/logout")
@@ -234,24 +228,25 @@ def admin_dashboard():
     with get_db() as conn:
         services = conn.execute("SELECT * FROM services ORDER BY category_type, sub_category").fetchall()
     return render_template_string(LAYOUT_TEMPLATE.replace("{% block content %}{% endblock %}", """
-    <div class="bg-white p-6 rounded shadow">
-        <h2 class="text-xl font-bold mb-4">项目与分类管理列表</h2>
-        <table class="w-full text-left">
-            <thead><tr class="border-b"><th class="p-2">主分类</th><th class="p-2">子分类</th><th class="p-2">名称</th><th class="p-2">价格</th></tr></thead>
-            <tbody>
-                {% for item in services %}
-                <tr class="border-b"><td class="p-2 font-bold text-indigo-600">{{ item.category_type }}</td><td class="p-2">{{ item.sub_category }}</td><td class="p-2">{{ item.name }}</td><td class="p-2">￥{{ "%.2f"|format(item.price) }}</td></tr>
-                {% endfor %}
-            </tbody>
-        </table>
-    </div>
+        <div class="bg-white p-6 rounded shadow">
+            <h2 class="text-xl font-bold mb-4">项目与分类管理列表</h2>
+            <table class="w-full text-left">
+                <thead><tr class="border-b"><th class="p-2">主分类</th><th class="p-2">子分类</th><th class="p-2">名称</th><th class="p-2">价格</th></tr></thead>
+                <tbody>
+                    {% for item in services %}
+                    <tr class="border-b"><td class="p-2 font-bold text-indigo-600">{{ item.category_type }}</td><td class="p-2">{{ item.sub_category }}</td><td class="p-2">{{ item.name }}</td><td class="p-2">￥{{ "%.2f"|format(item.price) }}</td></tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
     """), services=services)
-    @app.route("/admin/pos")
-    @admin_required
-    def admin_pos():
-        with get_db() as conn:
-            services = conn.execute("SELECT * FROM services").fetchall()
-        return render_template_string(LAYOUT_TEMPLATE.replace("{% block content %}{% endblock %}", """
+
+@app.route("/admin/pos")
+@admin_required
+def admin_pos():
+    with get_db() as conn:
+        services = conn.execute("SELECT * FROM services").fetchall()
+    return render_template_string(LAYOUT_TEMPLATE.replace("{% block content %}{% endblock %}", """
         <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
             <div class="md:col-span-2 bg-white p-6 rounded-lg shadow">
                 <h2 class="text-xl font-bold mb-4">点选服务 / 产品 (POS)</h2>
@@ -265,7 +260,6 @@ def admin_dashboard():
                     {% endfor %}
                 </div>
             </div>
-
             <div class="bg-white p-6 rounded-lg shadow">
                 <h2 class="text-xl font-bold mb-4">当前订单结账</h2>
                 <div id="order-items" class="min-h-[180px] border-b mb-4">
@@ -274,7 +268,6 @@ def admin_dashboard():
                 <div class="text-xl font-bold mb-4">
                     总金额: <span id="total-amount" class="text-red-600">￥0.00</span>
                 </div>
-
                 <form action="/admin/checkout" method="POST">
                     <input type="hidden" name="cart_data" id="cart_data_input">
                     <div class="mb-3">
@@ -298,7 +291,6 @@ def admin_dashboard():
                 </form>
             </div>
         </div>
-
         <script>
             let cart = [];
             function addToOrder(name, price) {
@@ -317,34 +309,28 @@ def admin_dashboard():
                 document.getElementById('cart_data_input').value = JSON.stringify(cart);
             }
         </script>
-        """), services=services)
+    """), services=services)
 
-    @app.route("/admin/checkout", methods=["POST"])
-    @admin_required
-    def checkout():
-        cart_data = json.loads(request.form.get("cart_data", "[]"))
-        name = request.form.get("customer_name")
-        phone = request.form.get("customer_phone")
-        pay_method = request.form.get("payment_method")
-
-        total = sum(item["price"] for item in cart_data)
-        order_no = "INV" + datetime.now().strftime("%Y%m%d%H%M%S")
-
-        with get_db() as conn:
-            cursor = conn.cursor()
-            cursor.execute("INSERT OR IGNORE INTO customers (name, phone, token) VALUES (?, ?, ?)", (name, phone, secrets.token_hex(8)))
-            cursor.execute("SELECT id FROM customers WHERE phone = ?", (phone,))
-            cust_id = cursor.fetchone()[0]
-
-            cursor.execute("INSERT INTO orders (order_no, customer_id, total_amount, payment_details, created_at) VALUES (?, ?, ?, ?, ?)",
-                           (order_no, cust_id, total, pay_method, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
-            order_id = cursor.lastrowid
-
-            for item in cart_data:
-                cursor.execute("INSERT INTO order_items (order_id, item_name, price) VALUES (?, ?, ?)", (order_id, item["name"], item["price"]))
-
-        return f"""
-        <div style="max-width:500px;margin:50px auto;padding:20px;border:1px solid #000;font-family:sans-serif;">
+@app.route("/admin/checkout", methods=["POST"])
+@admin_required
+def checkout():
+    cart_data = json.loads(request.form.get("cart_data", "[]"))
+    name = request.form.get("customer_name")
+    phone = request.form.get("customer_phone")
+    pay_method = request.form.get("payment_method")
+    total = sum(item["price"] for item in cart_data)
+    order_no = "INV" + datetime.now().strftime("%Y%m%d%H%M%S")
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("INSERT OR IGNORE INTO customers (name, phone, token) VALUES (?, ?, ?)", (name, phone, secrets.token_hex(8)))
+        cursor.execute("SELECT id FROM customers WHERE phone = ?", (phone,))
+        cust_id = cursor.fetchone()[0]
+        cursor.execute("INSERT INTO orders (order_no, customer_id, total_amount, payment_details, created_at) VALUES (?, ?, ?, ?, ?)", (order_no, cust_id, total, pay_method, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+        order_id = cursor.lastrowid
+        for item in cart_data:
+            cursor.execute("INSERT INTO order_items (order_id, item_name, price) VALUES (?, ?, ?)", (order_id, item["name"], item["price"]))
+    return f"""
+        <div style="max-width:500px;margin:50px auto;padding:20px;border:1px solid #000;font-family:sans-serif;border-radius:8px;">
             <h2>Dew Hair Salon 官方电子发票</h2>
             <p>Reg No: 202503122676</p>
             <hr>
@@ -353,37 +339,33 @@ def admin_dashboard():
             <p><strong>支付金额：</strong> ￥{total:.2f}</p>
             <p><strong>支付方式：</strong> {pay_method}</p>
             <hr>
-            <a href="https://wa.me/{phone}?text=感谢光临 Dew Hair Salon！您的电子发票单号：{order_no}，总金额：￥{total:.2f}" target="_blank" style="display:inline-block;padding:10px 15px;background:#25D366;color:white;text-decoration:none;border-radius:5px;">一键发送 WhatsApp 发票</a>
+            <a href="https://wa.me/{phone}?text=感谢光临 Dew Hair Salon！您的电子发票单号：{order_no}，总金额：￥{total:.2f}" target="_blank" style="display:inline-block;padding:10px 15px;background:#25D366;color:white;text-decoration:none;border-radius:5px;font-weight:bold;">一键发送 WhatsApp 发票</a>
             <br><br>
-            <a href="/admin/pos" style="color:blue;">返回 POS 收银台</a>
+            <a href="/admin/pos" style="color:#4f46e5;font-weight:bold;text-decoration:none;">返回 POS 收银台</a>
         </div>
-        """
+    """
 
-    @app.route("/book", methods=["GET", "POST"])
-    def public_booking():
-        if request.method == "POST":
-            service_id = request.form.get("service_id")
-            stylist = request.form.get("stylist")
-            b_date = request.form.get("booking_date")
-            b_time = request.form.get("booking_time")
-            c_name = request.form.get("customer_name")
-            c_phone = request.form.get("customer_phone")
-
-            start_time_str = f"{b_date} {b_time}"
-            token = secrets.token_hex(8)
-
-            with get_db() as conn:
-                cursor = conn.cursor()
-                cursor.execute("INSERT OR IGNORE INTO customers (name, phone, token) VALUES (?, ?, ?)", (c_name, c_phone, token))
-                cursor.execute("SELECT id, token FROM customers WHERE phone = ?", (c_phone,))
-                cust = cursor.fetchone()
-
-                cursor.execute("""
-                    INSERT INTO appointments (customer_id, service_id, stylist, start_time)
-                    VALUES (?, ?, ?, ?)
-                """, (cust["id"], service_id, stylist, start_time_str))
-
-            return f"""
+@app.route("/book", methods=["GET", "POST"])
+def public_booking():
+    if request.method == "POST":
+        service_id = request.form.get("service_id")
+        stylist = request.form.get("stylist")
+        b_date = request.form.get("booking_date")
+        b_time = request.form.get("booking_time")
+        c_name = request.form.get("customer_name")
+        c_phone = request.form.get("customer_phone")
+        start_time_str = f"{b_date} {b_time}"
+        token = secrets.token_hex(8)
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute("INSERT OR IGNORE INTO customers (name, phone, token) VALUES (?, ?, ?)", (c_name, c_phone, token))
+            cursor.execute("SELECT id, token FROM customers WHERE phone = ?", (c_phone,))
+            cust = cursor.fetchone()
+            cursor.execute("""
+                INSERT INTO appointments (customer_id, service_id, stylist, start_time)
+                VALUES (?, ?, ?, ?)
+            """, (cust["id"], service_id, stylist, start_time_str))
+        return f"""
             <div style="max-width:400px;margin:50px auto;text-align:center;font-family:sans-serif;padding:20px;border:1px solid #ddd;border-radius:8px;">
                 <h2 style="color:green;">预约成功！</h2>
                 <p>感谢您，{c_name}！您的预约已成功提交。</p>
@@ -391,68 +373,63 @@ def admin_dashboard():
                 <p><strong>发型师：</strong>{stylist}</p>
                 <hr style="margin:20px 0;">
                 <p>这是您的个人专属 Profile Link：</p>
-                <a href="/customer/{cust['token']}" style="display:inline-block;padding:10px 15px;background:indigo;color:white;text-decoration:none;border-radius:5px;">查看我的 Profile 专属页</a>
+                <a href="/customer/{cust['token']}" style="display:inline-block;padding:10px 15px;background:#4f46e5;color:white;text-decoration:none;border-radius:5px;font-weight:bold;">查看我的 Profile 专属页</a>
             </div>
-            """
+        """
+    timeslots = []
+    start = datetime.strptime("10:00", "%H:%M")
+    end = datetime.strptime("20:00", "%H:%M")
+    while start <= end:
+        timeslots.append(start.strftime("%H:%M"))
+        start += timedelta(minutes=15)
+    with get_db() as conn:
+        services = conn.execute("SELECT * FROM services WHERE category_type='Services'").fetchall()
+    return render_template_string(BOOKING_TEMPLATE, services=services, timeslots=timeslots)
 
-        timeslots = []
-        start = datetime.strptime("10:00", "%H:%M")
-        end = datetime.strptime("20:00", "%H:%M")
-        while start <= end:
-            timeslots.append(start.strftime("%H:%M"))
-            start += timedelta(minutes=15)
-
-        with get_db() as conn:
-            services = conn.execute("SELECT * FROM services WHERE category_type='Services'").fetchall()
-
-        return render_template_string(BOOKING_TEMPLATE, services=services, timeslots=timeslots)
-
-    @app.route("/customer/<token>")
-    def customer_profile(token):
-        with get_db() as conn:
-            cust = conn.execute("SELECT * FROM customers WHERE token = ?", (token,)).fetchone()
-            if not cust:
-                return "无效的顾客专属 Link", 404
-
-            orders = conn.execute("""
-                SELECT o.*, i.item_name, i.price 
-                FROM orders o 
-                LEFT JOIN order_items i ON o.id = i.order_id 
-                WHERE o.customer_id = ? ORDER BY o.created_at DESC
-            """, (cust["id"],)).fetchall()
-
-        return render_template_string("""
+@app.route("/customer/<token>")
+def customer_profile(token):
+    with get_db() as conn:
+        cust = conn.execute("SELECT * FROM customers WHERE token = ?", (token,)).fetchone()
+        if not cust:
+            return "无效的顾客专属 Link", 404
+        orders = conn.execute("""
+            SELECT o.*, i.item_name, i.price FROM orders o 
+            LEFT JOIN order_items i ON o.id = i.order_id 
+            WHERE o.customer_id = ? 
+            ORDER BY o.created_at DESC
+        """, (cust["id"],)).fetchall()
+    return render_template_string("""
         <div style="max-width:500px;margin:30px auto;padding:20px;border:1px solid #ccc;font-family:sans-serif;border-radius:8px;">
-            <h2 style="color:indigo;">Dew Hair Salon - 顾客专属个人中心</h2>
+            <h2 style="color:#4f46e5;">Dew Hair Salon - 顾客专属个人中心</h2>
             <p><strong>姓名：</strong> {{ cust.name }}</p>
             <p><strong>电话：</strong> {{ cust.phone }}</p>
             <p><strong>储值余额 (Credit Balance)：</strong> <span style="color:green;font-weight:bold;">￥{{ "%.2f"|format(cust.credits) }}</span></p>
             <hr>
             <h3>历史消费与服务记录</h3>
             {% if orders %}
-                <ul style="padding-left:20px;">
+            <ul style="padding-left:20px;">
                 {% for o in orders %}
-                    <li>{{ o.created_at }} - {{ o.item_name }} (￥{{ "%.2f"|format(o.price) }})</li>
+                <li style="margin-bottom: 6px;">{{ o.created_at }} - <strong>{{ o.item_name }}</strong> (￥{{ "%.2f"|format(o.price) }})</li>
                 {% endfor %}
-                </ul>
+            </ul>
             {% else %}
-                <p style="color:gray;">暂无历史消费记录。</p>
+            <p style="color:gray;">暂无历史消费记录。</p>
             {% endif %}
         </div>
-        """, cust=cust, orders=orders)
+    """, cust=cust, orders=orders)
 
-    @app.route("/admin/appointments")
-    @admin_required
-    def admin_appointments():
-        with get_db() as conn:
-            appointments = conn.execute("""
-                SELECT a.*, c.name as customer_name, c.phone as customer_phone, s.name as service_name 
-                FROM appointments a 
-                JOIN customers c ON a.customer_id = c.id 
-                JOIN services s ON a.service_id = s.id 
-                ORDER BY a.start_time DESC
-            """).fetchall()
-        return render_template_string(LAYOUT_TEMPLATE.replace("{% block content %}{% endblock %}", """
+@app.route("/admin/appointments")
+@admin_required
+def admin_appointments():
+    with get_db() as conn:
+        appointments = conn.execute("""
+            SELECT a.*, c.name as customer_name, c.phone as customer_phone, s.name as service_name 
+            FROM appointments a 
+            JOIN customers c ON a.customer_id = c.id 
+            JOIN services s ON a.service_id = s.id 
+            ORDER BY a.start_time DESC
+        """).fetchall()
+    return render_template_string(LAYOUT_TEMPLATE.replace("{% block content %}{% endblock %}", """
         <div class="bg-white p-6 rounded shadow">
             <h2 class="text-xl font-bold mb-4">预约记录列表</h2>
             <table class="w-full text-left border-collapse">
@@ -480,18 +457,17 @@ def admin_dashboard():
                 </tbody>
             </table>
         </div>
-        """), appointments=appointments)
+    """), appointments=appointments)
 
-    @app.route("/admin/reports")
-    @admin_required
-    def admin_reports():
-        with get_db() as conn:
-            order_count = conn.execute("SELECT COUNT(*) FROM orders").fetchone()[0]
-            total_revenue = conn.execute("SELECT SUM(total_amount) FROM orders").fetchone()[0] or 0.0
-            customer_count = conn.execute("SELECT COUNT(*) FROM customers").fetchone()[0]
-            item_count = conn.execute("SELECT COUNT(*) FROM order_items").fetchone()[0]
-
-        return render_template_string(LAYOUT_TEMPLATE.replace("{% block content %}{% endblock %}", """
+@app.route("/admin/reports")
+@admin_required
+def admin_reports():
+    with get_db() as conn:
+        order_count = conn.execute("SELECT COUNT(*) FROM orders").fetchone()[0]
+        total_revenue = conn.execute("SELECT SUM(total_amount) FROM orders").fetchone()[0] or 0.0
+        customer_count = conn.execute("SELECT COUNT(*) FROM customers").fetchone()[0]
+        item_count = conn.execute("SELECT COUNT(*) FROM order_items").fetchone()[0]
+    return render_template_string(LAYOUT_TEMPLATE.replace("{% block content %}{% endblock %}", """
         <div class="bg-white p-6 rounded shadow">
             <h2 class="text-xl font-bold mb-6 border-b pb-2">90天历史数据看板</h2>
             <div class="grid grid-cols-2 md:grid-cols-4 gap-4 text-center">
@@ -508,19 +484,12 @@ def admin_dashboard():
                     <div class="text-3xl font-bold text-yellow-600">{{ item_count }}</div>
                 </div>
                 <div class="bg-purple-50 p-4 rounded shadow">
-                    <div class="text-gray-500 text-sm">顾客总量</div>
+                    <div class="text-gray-500 text-sm">顾客总数</div>
                     <div class="text-3xl font-bold text-purple-600">{{ customer_count }}</div>
                 </div>
             </div>
         </div>
-        """), order_count=order_count, total_revenue=total_revenue, customer_count=customer_count, item_count=item_count)
+    """))
 
-    @app.route("/")
-    def index():
-        return redirect(url_for("admin_pos"))
-import os
 if __name__ == "__main__":
-    init_db()
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
-   
+    app.run(host="0.0.0.0", port=10000, debug=False)
