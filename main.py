@@ -580,49 +580,156 @@ def admin_customer_detail(id):
         </div>
     """), cust=cust, orders=orders, appointments=appointments)
 
+ADMIN_APPOINTMENTS_TEMPLATE = """
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dew Hair Salon 管理系统 - 预约管理</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-100 min-h-screen">
+    <nav class="bg-indigo-600 text-white p-4 shadow-md">
+        <div class="container mx-auto flex justify-between items-center">
+            <h1 class="text-xl font-bold">Dew Hair Salon 管理后台</h1>
+            <div class="flex space-x-2 text-sm font-bold">
+                <a href="/admin/pos" class="hover:bg-indigo-700 px-2 py-1 rounded">POS 收银</a>
+                <a href="/admin/appointments" class="hover:bg-indigo-700 px-2 py-1 rounded bg-indigo-800">预约管理</a>
+                <a href="/admin/customers" class="hover:bg-indigo-700 px-2 py-1 rounded">会员与历史记录</a>
+                <a href="/admin/orders" class="hover:bg-indigo-700 px-2 py-1 rounded">订单历史</a>
+                <a href="/admin" class="hover:bg-indigo-700 px-2 py-1 rounded">营业、项目与员工</a>
+                <a href="/admin/reports" class="hover:bg-indigo-700 px-2 py-1 rounded">90天报表</a>
+                <a href="/admin/logout" class="bg-red-500 px-2 py-1 rounded hover:bg-red-600">退出</a>
+            </div>
+        </div>
+    </nav>
+    <main class="container mx-auto p-6">
+        <div class="bg-white p-6 rounded-xl shadow-md">
+            <div class="flex flex-col md:flex-row justify-between items-start md:items-center mb-6 gap-4 border-b pb-4">
+                <h2 class="text-xl font-extrabold text-indigo-600">预约记录与时间轴管理</h2>
+                <div class="flex items-center gap-3">
+                    <label class="text-sm font-bold text-gray-700">切换/筛选日期：</label>
+                    <input type="date" id="admin_date_picker" value="{{ selected_date }}" class="border rounded-lg p-2 font-medium" onchange="changeAdminDate(this.value)">
+                    <button onclick="changeAdminDate('{{ today_str }}')" class="bg-gray-200 hover:bg-gray-300 text-gray-800 px-3 py-2 rounded-lg text-sm font-bold">今天</button>
+                </div>
+            </div>
+
+            <!-- 横向滑动按天查看条 -->
+            <div class="mb-6">
+                <div class="flex items-center justify-between mb-2">
+                    <span class="text-sm font-bold text-gray-600">快速按天滑动查看</span>
+                    <span class="text-xs text-gray-400">支持左右滚动</span>
+                </div>
+                <div class="flex gap-2 overflow-x-auto pb-2 scrollbar-thin">
+                    {% for d in date_strip %}
+                    <a href="/admin/appointments?date={{ d.date_str }}" class="flex-shrink-0 w-24 p-3 rounded-xl border text-center transition {% if d.date_str == selected_date %}bg-indigo-600 text-white border-indigo-600 shadow-md font-bold{% else %}bg-white text-gray-700 hover:border-indigo-400{% endif %}">
+                        <div class="text-xs opacity-80">{{ d.weekday }}</div>
+                        <div class="text-sm font-bold my-1">{{ d.display_date }}</div>
+                        <div class="text-[10px] bg-opacity-25 py-0.5 px-1 rounded {% if d.date_str == selected_date %}bg-indigo-800 text-white{% else %}bg-gray-100 text-gray-600{% endif %}">
+                            {{ d.count }} 场预约
+                        </div>
+                    </a>
+                    {% endfor %}
+                </div>
+            </div>
+
+            <!-- 预约列表 -->
+            <div class="overflow-x-auto">
+                <table class="w-full text-left border-collapse">
+                    <thead>
+                        <tr class="border-b bg-gray-50 text-gray-700 text-sm">
+                            <th class="p-3">时间段</th>
+                            <th class="p-3">顾客姓名</th>
+                            <th class="p-3">电话</th>
+                            <th class="p-3">服务项目</th>
+                            <th class="p-3">发型师</th>
+                            <th class="p-3">状态</th>
+                            <th class="p-3">操作</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for app in appointments %}
+                        <tr class="border-b hover:bg-gray-50">
+                            <td class="p-3 font-bold text-indigo-600">{{ app.start_time.split()[1] }} ~ {{ app.end_time.split()[1] }}</td>
+                            <td class="p-3 font-bold">{{ app.customer_name }}</td>
+                            <td class="p-3 text-gray-600">{{ app.customer_phone }}</td>
+                            <td class="p-3">{{ app.service_name }}</td>
+                            <td class="p-3 font-medium text-gray-800">{{ app.stylist }}</td>
+                            <td class="p-3">
+                                <span class="bg-green-100 text-green-800 px-2 py-1 rounded text-xs font-bold">{{ app.status }}</span>
+                            </td>
+                            <td class="p-3">
+                                <a href="/admin/appointment/delete/{{ app.id }}" onclick="return confirm('确定取消此预约吗？')" class="text-red-500 hover:text-red-700 text-sm font-bold">删除</a>
+                            </td>
+                        </tr>
+                        {% else %}
+                        <tr>
+                            <td colspan="7" class="p-8 text-center text-gray-400">该日期 ({{ selected_date }}) 暂无预约记录</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </main>
+    <script>
+        function changeAdminDate(dateStr) {
+            window.location.href = "/admin/appointments?date=" + dateStr;
+        }
+    </script>
+</body>
+</html>
+"""
+
 @app.route("/admin/appointments")
 @admin_required
 def admin_appointments():
+    selected_date = request.args.get("date", datetime.now().strftime("%Y-%m-%d"))
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    
+    # 构造前后 15 天的滑动条数据
+    date_strip = []
+    base_dt = datetime.strptime(selected_date, "%Y-%m-%d")
+    start_loop = base_dt - timedelta(days=5)
+    
     with get_db() as conn:
+        for i in range(15):
+            d = start_loop + timedelta(days=i)
+            d_str = d.strftime("%Y-%m-%d")
+            
+            # 计算星期几
+            wd_map = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+            wd_str = wd_map[d.weekday()]
+            if d_str == today_str:
+                wd_str = "今天"
+                
+            # 统计当日预约数量
+            cnt = conn.execute("SELECT COUNT(*) FROM appointments WHERE start_time LIKE ? AND status = 'CONFIRMED'", (f"{d_str}%",)).fetchone()[0]
+            
+            date_strip.append({
+                "date_str": d_str,
+                "display_date": d.strftime("%m-%d"),
+                "weekday": wd_str,
+                "count": cnt
+            })
+            
         appointments = conn.execute("""
             SELECT a.*, c.name as customer_name, c.phone as customer_phone, s.name as service_name 
             FROM appointments a 
             JOIN customers c ON a.customer_id = c.id 
             JOIN services s ON a.service_id = s.id 
-            ORDER BY a.start_time DESC
-        """).fetchall()
-    return render_template_string(LAYOUT_TEMPLATE.replace("{% block content %}{% endblock %}", """
-        <div class="bg-white p-6 rounded shadow">
-            <h2 class="text-xl font-bold mb-4">预约记录与时间轴管理</h2>
-            <table class="w-full text-left border-collapse">
-                <thead>
-                    <tr class="border-b bg-gray-50">
-                        <th class="p-2">时间段</th>
-                        <th class="p-2">顾客姓名</th>
-                        <th class="p-2">电话</th>
-                        <th class="p-2">服务项目</th>
-                        <th class="p-2">发型师</th>
-                        <th class="p-2">操作</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {% for app in appointments %}
-                    <tr class="border-b">
-                        <td class="p-2 font-bold">{{ app.start_time }} ~ {{ app.end_time.split()[1] }}</td>
-                        <td class="p-2">{{ app.customer_name }}</td>
-                        <td class="p-2">{{ app.customer_phone }}</td>
-                        <td class="p-2">{{ app.service_name }}</td>
-                        <td class="p-2">{{ app.stylist }}</td>
-                        <td class="p-2">
-                            <span class="text-green-600 font-bold mr-2">{{ app.status }}</span>
-                            <a href="/admin/appointment/delete/{{ app.id }}" onclick="return confirm('确定取消此预约吗？')" class="text-red-500 text-sm font-bold">删除</a>
-                        </td>
-                    </tr>
-                    {% endfor %}
-                </tbody>
-            </table>
-        </div>
-    """), appointments=appointments)
+            WHERE a.start_time LIKE ?
+            ORDER BY a.start_time ASC
+        """, (f"{selected_date}%",)).fetchall()
+        
+    return render_template_string(
+        ADMIN_APPOINTMENTS_TEMPLATE, 
+        appointments=appointments, 
+        date_strip=date_strip, 
+        selected_date=selected_date, 
+        today_str=today_str
+    )
 
 @app.route("/admin/appointment/delete/<int:id>")
 @admin_required
@@ -870,7 +977,7 @@ BOOKING_CALENDAR_TEMPLATE = """
 <body class="bg-gray-50 min-h-screen p-4 md:p-8">
     <div class="max-w-3xl mx-auto bg-white p-6 md:p-8 rounded-xl shadow-md">
         <h2 class="text-3xl font-extrabold text-center text-indigo-600 mb-2">Dew Hair Salon 在线预约</h2>
-        <p class="text-center text-sm text-gray-500 mb-6">营业时间: {{ open_time }} - {{ close_time }} (请直接选择发型师、日期与合适的时间段)</p>
+        <p class="text-center text-sm text-gray-500 mb-6">营业时间: {{ open_time }} - {{ close_time }} (左右滑动选择日期，点击卡片或输入框即刻切换)</p>
         
         {% if error %}
         <div class="mb-4 p-3 bg-red-100 text-red-700 rounded text-sm font-bold">{{ error }}</div>
@@ -910,10 +1017,23 @@ BOOKING_CALENDAR_TEMPLATE = """
                 </div>
             </div>
 
-            <!-- 选择日期 -->
+            <!-- 优化：横向滑动按天查看日期栏 + 隐藏/联动日期输入 -->
             <div class="mb-5">
-                <label class="block text-sm font-bold mb-2">3. 选择预约日期</label>
-                <input type="date" name="booking_date" id="booking_date" class="w-full border rounded p-3 text-lg font-medium" value="{{ today_str }}" min="{{ today_str }}" required>
+                <div class="flex justify-between items-center mb-2">
+                    <label class="block text-sm font-bold">3. 选择预约日期 (支持左右滑动)</label>
+                    <input type="date" name="booking_date" id="booking_date" value="{{ selected_date }}" min="{{ today_str }}" class="border rounded px-2 py-1 text-sm text-indigo-600 font-bold" onchange="syncDateInput(this.value)">
+                </div>
+                
+                <!-- 左右滑动卡片条 -->
+                <div class="flex gap-2 overflow-x-auto pb-2 scrollbar-thin" id="dateStripContainer">
+                    {% for d in date_strip %}
+                    <div onclick="selectDateCard('{{ d.date_str }}')" class="date-card flex-shrink-0 w-24 p-3 rounded-xl border text-center cursor-pointer transition {% if d.date_str == selected_date %}bg-indigo-600 text-white border-indigo-600 shadow-md font-bold{% else %}bg-white text-gray-700 hover:border-indigo-400{% endif %}" data-date="{{ d.date_str }}">
+                        <div class="text-xs opacity-80">{{ d.weekday }}</div>
+                        <div class="text-sm font-bold my-1">{{ d.display_date }}</div>
+                        <div class="text-[10px] opacity-70">{{ d.year }}</div>
+                    </div>
+                    {% endfor %}
+                </div>
             </div>
 
             <!-- 选择时间段 -->
@@ -945,7 +1065,7 @@ BOOKING_CALENDAR_TEMPLATE = """
         </form>
     </div>
     <script>
-        // 为所选时间添加点击视觉高亮
+        // 时间段高亮
         const timeLabels = document.querySelectorAll('input[name="booking_time"]');
         timeLabels.forEach(input => {
             input.addEventListener('change', function() {
@@ -959,6 +1079,24 @@ BOOKING_CALENDAR_TEMPLATE = """
                 }
             });
         });
+
+        // 联动日期卡片点击与输入框
+        function selectDateCard(dateStr) {
+            document.getElementById('booking_date').value = dateStr;
+            document.querySelectorAll('.date-card').forEach(card => {
+                if(card.getAttribute('data-date') === dateStr) {
+                    card.classList.add('bg-indigo-600', 'text-white', 'border-indigo-600', 'shadow-md', 'font-bold');
+                    card.classList.remove('bg-white', 'text-gray-700');
+                } else {
+                    card.classList.remove('bg-indigo-600', 'text-white', 'border-indigo-600', 'shadow-md', 'font-bold');
+                    card.classList.add('bg-white', 'text-gray-700');
+                }
+            });
+        }
+
+        function syncDateInput(dateStr) {
+            selectDateCard(dateStr);
+        }
     </script>
 </body>
 </html>
@@ -1052,6 +1190,28 @@ def public_booking_render(error=None):
         stylists = conn.execute("SELECT * FROM stylists").fetchall()
         
     today_str = datetime.now().strftime("%Y-%m-%d")
+    selected_date = request.args.get("date", today_str)
+    
+    # 构造顾客端左右滑动日期条（未来14天）
+    date_strip = []
+    base_dt = datetime.now()
+    wd_map = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+    for i in range(14):
+        d = base_dt + timedelta(days=i)
+        d_str = d.strftime("%Y-%m-%d")
+        wd_str = wd_map[d.weekday()]
+        if i == 0:
+            wd_str = "今天"
+        elif i == 1:
+            wd_str = "明天"
+            
+        date_strip.append({
+            "date_str": d_str,
+            "display_date": d.strftime("%m月%d日"),
+            "weekday": wd_str,
+            "year": d.strftime("%Y")
+        })
+        
     return render_template_string(
         BOOKING_CALENDAR_TEMPLATE, 
         services=services, 
@@ -1060,6 +1220,8 @@ def public_booking_render(error=None):
         open_time=open_time_str, 
         close_time=close_time_str, 
         today_str=today_str,
+        selected_date=selected_date,
+        date_strip=date_strip,
         error=error
     )
 
@@ -1139,7 +1301,7 @@ def admin_reports():
                     <div class="text-3xl font-bold text-green-600">RM {{ "%.2f"|format(total_revenue) }}</div>
                 </div>
                 <div class="bg-yellow-50 p-4 rounded shadow">
-                    <div class="text-gray-500 text-sm">项目销售量</div>
+                    <div class="text-symbol text-gray-500 text-sm">项目销售量</div>
                     <div class="text-3xl font-bold text-yellow-600">{{ item_count }}</div>
                 </div>
                 <div class="bg-purple-50 p-4 rounded shadow">
