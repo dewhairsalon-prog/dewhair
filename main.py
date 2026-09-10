@@ -314,36 +314,56 @@ def admin_pos():
 @app.route("/admin/checkout", methods=["POST"])
 @admin_required
 def checkout():
-    cart_data = json.loads(request.form.get("cart_data", "[]"))
-    name = request.form.get("customer_name")
-    phone = request.form.get("customer_phone")
-    pay_method = request.form.get("payment_method")
-    total = sum(item["price"] for item in cart_data)
-    order_no = "INV" + datetime.now().strftime("%Y%m%d%H%M%S")
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("INSERT OR IGNORE INTO customers (name, phone, token) VALUES (?, ?, ?)", (name, phone, secrets.token_hex(8)))
-        cursor.execute("SELECT id FROM customers WHERE phone = ?", (phone,))
-        cust_id = cursor.fetchone()[0]
-        cursor.execute("INSERT INTO orders (order_no, customer_id, total_amount, payment_details, created_at) VALUES (?, ?, ?, ?, ?)", (order_no, cust_id, total, pay_method, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
-        order_id = cursor.lastrowid
-        for item in cart_data:
-            cursor.execute("INSERT INTO order_items (order_id, item_name, price) VALUES (?, ?, ?)", (order_id, item["name"], item["price"]))
-    return f"""
-        <div style="max-width:500px;margin:50px auto;padding:20px;border:1px solid #000;font-family:sans-serif;border-radius:8px;">
-            <h2>Dew Hair Salon 官方电子发票</h2>
-            <p>Reg No: 202503122676</p>
-            <hr>
-            <p><strong>发票单号：</strong> {order_no}</p>
-            <p><strong>顾客姓名：</strong> {name} ({phone})</p>
-            <p><strong>支付金额：</strong> ￥{total:.2f}</p>
-            <p><strong>支付方式：</strong> {pay_method}</p>
-            <hr>
-            <a href="https://wa.me/{phone}?text=感谢光临 Dew Hair Salon！您的电子发票单号：{order_no}，总金额：￥{total:.2f}" target="_blank" style="display:inline-block;padding:10px 15px;background:#25D366;color:white;text-decoration:none;border-radius:5px;font-weight:bold;">一键发送 WhatsApp 发票</a>
-            <br><br>
-            <a href="/admin/pos" style="color:#4f46e5;font-weight:bold;text-decoration:none;">返回 POS 收银台</a>
-        </div>
-    """
+    try:
+        cart_data = json.loads(request.form.get("cart_data", "[]"))
+        name = request.form.get("customer_name")
+        phone = request.form.get("customer_phone")
+        pay_method = request.form.get("payment_method")
+        total = sum(item["price"] for item in cart_data)
+        order_no = "INV" + datetime.now().strftime("%Y%m%d%H%M%S")
+        
+        with get_db() as conn:
+            cursor = conn.cursor()
+            # 检查顾客是否存在
+            cursor.execute("SELECT id, token FROM customers WHERE phone = ?", (phone,))
+            cust = cursor.fetchone()
+            if cust:
+                cust_id = cust["id"]
+                cust_token = cust["token"]
+            else:
+                cust_token = secrets.token_hex(8)
+                cursor.execute("INSERT INTO customers (name, phone, token) VALUES (?, ?, ?)", (name, phone, cust_token))
+                cust_id = cursor.lastrowid
+                
+            cursor.execute("""
+                INSERT INTO orders (order_no, customer_id, total_amount, payment_details, created_at) 
+                VALUES (?, ?, ?, ?, ?)
+            """, (order_no, cust_id, total, pay_method, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+            order_id = cursor.lastrowid
+            
+            for item in cart_data:
+                cursor.execute("""
+                    INSERT INTO order_items (order_id, item_name, price) 
+                    VALUES (?, ?, ?)
+                """, (order_id, item["name"], item["price"]))
+                
+        return f"""
+            <div style="max-width:500px;margin:50px auto;padding:20px;border:1px solid #000;font-family:sans-serif;border-radius:8px;">
+                <h2>Dew Hair Salon 官方电子发票</h2>
+                <p>Reg No: 202503122676</p>
+                <hr>
+                <p><strong>发票单号：</strong> {order_no}</p>
+                <p><strong>顾客姓名：</strong> {name} ({phone})</p>
+                <p><strong>支付金额：</strong> ￥{total:.2f}</p>
+                <p><strong>支付方式：</strong> {pay_method}</p>
+                <hr>
+                <a href="https://wa.me/{phone}?text=感谢光临 Dew Hair Salon！您的电子发票单号：{order_no}，总金额：￥{total:.2f}" target="_blank" style="display:inline-block;padding:10px 15px;background:#25D366;color:white;text-decoration:none;border-radius:5px;font-weight:bold;">一键发送 WhatsApp 发票</a>
+                <br><br>
+                <a href="/admin/pos" style="color:#4f46e5;font-weight:bold;text-decoration:none;">返回 POS 收银台</a>
+            </div>
+        """
+    except Exception as e:
+        return f"结账发生错误: {str(e)}", 500
 
 @app.route("/book", methods=["GET", "POST"])
 def public_booking():
@@ -358,13 +378,19 @@ def public_booking():
         token = secrets.token_hex(8)
         with get_db() as conn:
             cursor = conn.cursor()
-            cursor.execute("INSERT OR IGNORE INTO customers (name, phone, token) VALUES (?, ?, ?)", (c_name, c_phone, token))
             cursor.execute("SELECT id, token FROM customers WHERE phone = ?", (c_phone,))
             cust = cursor.fetchone()
+            if not cust:
+                cursor.execute("INSERT INTO customers (name, phone, token) VALUES (?, ?, ?)", (c_name, c_phone, token))
+                cust_id = cursor.lastrowid
+                cust_token = token
+            else:
+                cust_id = cust["id"]
+                cust_token = cust["token"]
             cursor.execute("""
                 INSERT INTO appointments (customer_id, service_id, stylist, start_time)
                 VALUES (?, ?, ?, ?)
-            """, (cust["id"], service_id, stylist, start_time_str))
+            """, (cust_id, service_id, stylist, start_time_str))
         return f"""
             <div style="max-width:400px;margin:50px auto;text-align:center;font-family:sans-serif;padding:20px;border:1px solid #ddd;border-radius:8px;">
                 <h2 style="color:green;">预约成功！</h2>
@@ -373,7 +399,7 @@ def public_booking():
                 <p><strong>发型师：</strong>{stylist}</p>
                 <hr style="margin:20px 0;">
                 <p>这是您的个人专属 Profile Link：</p>
-                <a href="/customer/{cust['token']}" style="display:inline-block;padding:10px 15px;background:#4f46e5;color:white;text-decoration:none;border-radius:5px;font-weight:bold;">查看我的 Profile 专属页</a>
+                <a href="/customer/{cust_token}" style="display:inline-block;padding:10px 15px;background:#4f46e5;color:white;text-decoration:none;border-radius:5px;font-weight:bold;">查看我的 Profile 专属页</a>
             </div>
         """
     timeslots = []
