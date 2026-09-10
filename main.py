@@ -12,7 +12,10 @@ from flask import (
 app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", secrets.token_hex(32))
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "123456")
-DB_NAME = "salon.db"
+
+# 修复数据丢失：如果是在 Render 等云端，优先使用持久化目录 /opt/render/project/src 或当前目录
+DB_DIR = "/opt/render/project/src" if os.path.exists("/opt/render/project/src") else "."
+DB_NAME = os.path.join(DB_DIR, "salon.db")
 
 def get_db():
     conn = sqlite3.connect(DB_NAME)
@@ -434,21 +437,42 @@ def delete_service(id):
 @app.route("/admin/customers")
 @admin_required
 def admin_customers():
+    search_query = request.args.get("q", "").strip()
     with get_db() as conn:
-        customers = conn.execute("""
-            SELECT c.*, 
-                   (SELECT COUNT(*) FROM appointments WHERE customer_id = c.id) as app_count,
-                   (SELECT COUNT(*) FROM orders WHERE customer_id = c.id AND status = 'NORMAL') as order_count
-            FROM customers c 
-            ORDER BY c.id DESC
-        """).fetchall()
+        if search_query:
+            customers = conn.execute("""
+                SELECT c.*, 
+                       (SELECT COUNT(*) FROM appointments WHERE customer_id = c.id) as app_count,
+                       (SELECT COUNT(*) FROM orders WHERE customer_id = c.id AND status = 'NORMAL') as order_count
+                FROM customers c 
+                WHERE c.name LIKE ? OR c.phone LIKE ?
+                ORDER BY c.id DESC
+            """, (f"%{search_query}%", f"%{search_query}%")).fetchall()
+        else:
+            customers = conn.execute("""
+                SELECT c.*, 
+                       (SELECT COUNT(*) FROM appointments WHERE customer_id = c.id) as app_count,
+                       (SELECT COUNT(*) FROM orders WHERE customer_id = c.id AND status = 'NORMAL') as order_count
+                FROM customers c 
+                ORDER BY c.id DESC
+            """).fetchall()
+            
     return render_template_string(LAYOUT_TEMPLATE.replace("{% block content %}{% endblock %}", """
         <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
             <div class="md:col-span-2 bg-white p-6 rounded shadow">
-                <h2 class="text-xl font-bold mb-4">会员列表与历史档案</h2>
+                <div class="flex flex-col md:flex-row justify-between items-start md:items-center mb-4 gap-3">
+                    <h2 class="text-xl font-bold">会员列表与消费档案</h2>
+                    <form action="/admin/customers" method="GET" class="flex gap-2 w-full md:w-auto">
+                        <input type="text" name="q" value="{{ search_query }}" placeholder="搜姓名或手机号..." class="border rounded px-3 py-1 text-sm flex-grow">
+                        <button class="bg-indigo-600 text-white px-3 py-1 rounded text-sm font-bold">搜索</button>
+                        {% if search_query %}
+                        <a href="/admin/customers" class="bg-gray-300 text-gray-700 px-3 py-1 rounded text-sm font-bold flex items-center">重置</a>
+                        {% endif %}
+                    </form>
+                </div>
                 <table class="w-full text-left border-collapse">
                     <thead>
-                        <tr class="border-b bg-gray-50">
+                        <tr class="border-b bg-gray-50 text-sm">
                             <th class="p-2">姓名</th>
                             <th class="p-2">电话</th>
                             <th class="p-2">Credit 余额</th>
@@ -458,7 +482,7 @@ def admin_customers():
                     </thead>
                     <tbody>
                         {% for c in customers %}
-                        <tr class="border-b">
+                        <tr class="border-b hover:bg-gray-50">
                             <td class="p-2 font-bold">{{ c.name }}</td>
                             <td class="p-2">{{ c.phone }}</td>
                             <td class="p-2 text-green-600 font-bold">RM {{ "%.2f"|format(c.credits) }}</td>
@@ -466,8 +490,12 @@ def admin_customers():
                                 <a href="/customer/{{ c.token }}" target="_blank" class="text-indigo-600 underline text-sm font-bold">查看页面</a>
                             </td>
                             <td class="p-2">
-                                <a href="/admin/customer/detail/{{ c.id }}" class="bg-indigo-50 text-indigo-700 px-3 py-1 rounded text-sm font-bold hover:bg-indigo-100">消费历史</a>
+                                <a href="/admin/customer/detail/{{ c.id }}" class="bg-indigo-600 text-white px-3 py-1 rounded text-xs font-bold hover:bg-indigo-700">查看消费与预约记录</a>
                             </td>
+                        </tr>
+                        {% else %}
+                        <tr>
+                            <td colspan="5" class="p-6 text-center text-gray-400">没有找到相关会员，请在右侧添加或检查搜索词</td>
                         </tr>
                         {% endfor %}
                     </tbody>
@@ -493,7 +521,7 @@ def admin_customers():
                 </form>
             </div>
         </div>
-    """), customers=customers)
+    """), customers=customers, search_query=search_query)
 
 @app.route("/admin/customer/add", methods=["POST"])
 @admin_required
@@ -532,8 +560,8 @@ def admin_customer_detail(id):
         <div class="bg-white p-6 rounded shadow space-y-6">
             <div class="flex justify-between items-center border-b pb-4">
                 <div>
-                    <h2 class="text-2xl font-bold text-indigo-600">{{ cust.name }} 的会员档案</h2>
-                    <p class="text-gray-600">电话: {{ cust.phone }}</p>
+                    <h2 class="text-2xl font-bold text-indigo-600">{{ cust.name }} 的会员档案与消费记录</h2>
+                    <p class="text-gray-600">电话: {{ cust.phone }} | 专属链接码: {{ cust.token }}</p>
                 </div>
                 <div class="text-right">
                     <div class="text-sm text-gray-500">账户 Credit 余额</div>
@@ -547,7 +575,7 @@ def admin_customer_detail(id):
                     <thead><tr class="border-b bg-gray-50"><th class="p-2">时间段</th><th class="p-2">服务项目</th><th class="p-2">发型师</th><th class="p-2">状态</th></tr></thead>
                     <tbody>
                         {% for a in appointments %}
-                        <tr class="border-b"><td class="p-2">{{ a.start_time }} ~ {{ a.end_time.split()[1] }}</td><td class="p-2">{{ a.service_name }}</td><td class="p-2">{{ a.stylist }}</td><td class="p-2 text-green-600 font-bold">{{ a.status }}</td></tr>
+                        <tr class="border-b"><td class="p-2 font-medium">{{ a.start_time }} ~ {{ a.end_time.split()[1] }}</td><td class="p-2">{{ a.service_name }}</td><td class="p-2">{{ a.stylist }}</td><td class="p-2 text-green-600 font-bold">{{ a.status }}</td></tr>
                         {% else %}
                         <tr><td colspan="4" class="p-2 text-gray-400">暂无预约记录</td></tr>
                         {% endfor %}
@@ -558,7 +586,7 @@ def admin_customer_detail(id):
             <div>
                 <h3 class="text-lg font-bold mb-2">历史消费与订单明细</h3>
                 <table class="w-full text-left border-collapse">
-                    <thead><tr class="border-b bg-gray-50"><th class="p-2">单号</th><th class="p-2">时间</th><th class="p-2">项目/套餐</th><th class="p-2">金额</th><th class="p-2">状态</th></tr></thead>
+                    <thead><tr class="border-b bg-gray-50"><th class="p-2">单号</th><th class="p-2">时间</th><th class="p-2">项目/套餐</th><th class="p-2">金额</th><th class="p-2">状态/支付方式</th></tr></thead>
                     <tbody>
                         {% for o in orders %}
                         <tr class="border-b {% if o.status == 'VOID' %}bg-red-50 text-gray-400 line-through{% endif %}">
@@ -575,7 +603,7 @@ def admin_customer_detail(id):
                 </table>
             </div>
             <div>
-                <a href="/admin/customers" class="bg-gray-500 text-white px-4 py-2 rounded font-bold">返回会员列表</a>
+                <a href="/admin/customers" class="bg-gray-500 text-white px-4 py-2 rounded font-bold hover:bg-gray-600">返回会员列表</a>
             </div>
         </div>
     """), cust=cust, orders=orders, appointments=appointments)
@@ -1444,7 +1472,7 @@ def admin_reports():
                     <div class="text-3xl font-bold text-green-600">RM {{ "%.2f"|format(total_revenue) }}</div>
                 </div>
                 <div class="bg-yellow-50 p-4 rounded shadow">
-                    <div class="text-symbol text-gray-500 text-sm">项目销售量</div>
+                    <div class="text-gray-symbol text-gray-500 text-sm">项目销售量</div>
                     <div class="text-3xl font-bold text-yellow-600">{{ item_count }}</div>
                 </div>
                 <div class="bg-purple-50 p-4 rounded shadow">
