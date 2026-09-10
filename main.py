@@ -128,7 +128,7 @@ LAYOUT_TEMPLATE = """
             <div class="flex space-x-3 text-sm font-bold">
                 <a href="/admin/pos" class="hover:bg-indigo-700 px-2 py-1 rounded">POS 收银台</a>
                 <a href="/admin/appointments" class="hover:bg-indigo-700 px-2 py-1 rounded">预约管理</a>
-                <a href="/admin" class="hover:bg-indigo-700 px-2 py-1 rounded">项目分类</a>
+                <a href="/admin" class="hover:bg-indigo-700 px-2 py-1 rounded">项目与分类</a>
                 <a href="/admin/reports" class="hover:bg-indigo-700 px-2 py-1 rounded">90天报表</a>
                 <a href="/admin/logout" class="bg-red-500 px-2 py-1 rounded hover:bg-red-600">退出</a>
             </div>
@@ -228,18 +228,76 @@ def admin_dashboard():
     with get_db() as conn:
         services = conn.execute("SELECT * FROM services ORDER BY category_type, sub_category").fetchall()
     return render_template_string(LAYOUT_TEMPLATE.replace("{% block content %}{% endblock %}", """
-        <div class="bg-white p-6 rounded shadow">
-            <h2 class="text-xl font-bold mb-4">项目与分类管理列表</h2>
-            <table class="w-full text-left">
-                <thead><tr class="border-b"><th class="p-2">主分类</th><th class="p-2">子分类</th><th class="p-2">名称</th><th class="p-2">价格</th></tr></thead>
-                <tbody>
-                    {% for item in services %}
-                    <tr class="border-b"><td class="p-2 font-bold text-indigo-600">{{ item.category_type }}</td><td class="p-2">{{ item.sub_category }}</td><td class="p-2">{{ item.name }}</td><td class="p-2">￥{{ "%.2f"|format(item.price) }}</td></tr>
-                    {% endfor %}
-                </tbody>
-            </table>
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+            <div class="md:col-span-2 bg-white p-6 rounded shadow">
+                <h2 class="text-xl font-bold mb-4">项目与分类管理列表</h2>
+                <table class="w-full text-left">
+                    <thead><tr class="border-b"><th class="p-2">主分类</th><th class="p-2">子分类</th><th class="p-2">名称</th><th class="p-2">价格</th><th class="p-2">操作</th></tr></thead>
+                    <tbody>
+                        {% for item in services %}
+                        <tr class="border-b">
+                            <td class="p-2 font-bold text-indigo-600">{{ item.category_type }}</td>
+                            <td class="p-2">{{ item.sub_category }}</td>
+                            <td class="p-2">{{ item.name }}</td>
+                            <td class="p-2">￥{{ "%.2f"|format(item.price) }}</td>
+                            <td class="p-2">
+                                <a href="/admin/service/delete/{{ item.id }}" onclick="return confirm('确定要删除吗？')" class="text-red-500 text-sm font-bold">删除</a>
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+            <div class="bg-white p-6 rounded shadow h-fit">
+                <h2 class="text-xl font-bold mb-4">添加新服务/产品</h2>
+                <form action="/admin/service/add" method="POST">
+                    <div class="mb-3">
+                        <label class="block text-sm font-medium">名称</label>
+                        <input type="text" name="name" class="w-full border rounded p-2" required>
+                    </div>
+                    <div class="mb-3">
+                        <label class="block text-sm font-medium">主分类 (Services / Products)</label>
+                        <select name="category_type" class="w-full border rounded p-2">
+                            <option value="Services">Services (服务项目)</option>
+                            <option value="Products">Products (零售产品)</option>
+                        </select>
+                    </div>
+                    <div class="mb-3">
+                        <label class="block text-sm font-medium">子分类 (如: 剪发/染发/洗护等)</label>
+                        <input type="text" name="sub_category" class="w-full border rounded p-2" value="常规项目" required>
+                    </div>
+                    <div class="mb-3">
+                        <label class="block text-sm font-medium">价格 (￥)</label>
+                        <input type="number" step="0.01" name="price" class="w-full border rounded p-2" required>
+                    </div>
+                    <div class="mb-4">
+                        <label class="block text-sm font-medium">预计耗时 (分钟)</label>
+                        <input type="number" name="duration" class="w-full border rounded p-2" value="30" required>
+                    </div>
+                    <button class="w-full bg-indigo-600 text-white font-bold py-2 rounded hover:bg-indigo-700">确认添加项目</button>
+                </form>
+            </div>
         </div>
     """), services=services)
+
+@app.route("/admin/service/add", methods=["POST"])
+@admin_required
+def add_service():
+    name = request.form.get("name")
+    cat = request.form.get("category_type")
+    sub_cat = request.form.get("sub_category")
+    price = float(request.form.get("price", 0))
+    duration = int(request.form.get("duration", 30))
+    with get_db() as conn:
+        conn.execute("INSERT INTO services (name, category_type, sub_category, price, duration) VALUES (?, ?, ?, ?, ?)", (name, cat, sub_cat, price, duration))
+    return redirect(url_for("admin_dashboard"))
+
+@app.route("/admin/service/delete/<int:id>")
+@admin_required
+def delete_service(id):
+    with get_db() as conn:
+        conn.execute("DELETE FROM services WHERE id = ?", (id,))
+    return redirect(url_for("admin_dashboard"))
 
 @app.route("/admin/pos")
 @admin_required
@@ -324,7 +382,6 @@ def checkout():
         
         with get_db() as conn:
             cursor = conn.cursor()
-            # 检查顾客是否存在
             cursor.execute("SELECT id, token FROM customers WHERE phone = ?", (phone,))
             cust = cursor.fetchone()
             if cust:
