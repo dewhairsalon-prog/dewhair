@@ -1273,7 +1273,7 @@ def public_booking():
         try:
             d_obj = datetime.strptime(b_date, "%Y-%m-%d")
             closed_wd = int(get_setting("closed_weekdays", "1"))
-            if d_obj.weekday() == closed_wd:
+            if closed_wd != -1 and d_obj.weekday() == closed_wd:
                 return public_booking_render(error="Booking failed: Salon is closed on this day!")
         except:
             return public_booking_render(error="Invalid date format!")
