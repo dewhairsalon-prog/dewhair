@@ -29,7 +29,8 @@ def init_db():
                 category_type TEXT NOT NULL,
                 sub_category TEXT NOT NULL,
                 price REAL NOT NULL,
-                duration INTEGER DEFAULT 30
+                duration INTEGER DEFAULT 30,
+                credit_value REAL DEFAULT 0.0
             );
         """)
         conn.execute("""
@@ -48,6 +49,7 @@ def init_db():
                 customer_id INTEGER NOT NULL,
                 total_amount REAL NOT NULL,
                 payment_details TEXT NOT NULL,
+                status TEXT DEFAULT 'NORMAL',
                 created_at TEXT NOT NULL,
                 FOREIGN KEY(customer_id) REFERENCES customers(id)
             );
@@ -89,26 +91,21 @@ def init_db():
             );
         """)
         
-        # 默认系统设置
         conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('open_time', '10:00')")
         conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('close_time', '20:00')")
-        conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('closed_weekdays', '1')") # 默认周一休息 (0=周日, 1=周一...)
+        conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('closed_weekdays', '1')")
         
         cursor = conn.cursor()
         cursor.execute("SELECT COUNT(*) FROM services")
         if cursor.fetchone()[0] == 0:
             sample_services = [
-                ("高级总监剪发", "Services", "剪发", 120.0, 45),
-                ("植物精油染发", "Services", "染发", 380.0, 90),
-                ("蛋白修护烫发", "Services", "烫发", 450.0, 120),
-                ("深度发膜护理", "Services", "护理", 260.0, 60),
-                ("防脱头皮理疗", "Services", "头皮理疗", 320.0, 60),
-                ("充值 1000 元送 200", "Packages", "储值套餐", 1000.0, 0),
-                ("充值 500 元送 80", "Packages", "储值套餐", 500.0, 0),
+                ("高级总监剪发", "Services", "剪发", 120.0, 45, 0.0),
+                ("植物精油染发", "Services", "染发", 380.0, 90, 0.0),
+                ("充值 1000 送 200", "Packages", "储值套餐", 1000.0, 0, 1200.0),
             ]
             cursor.executemany("""
-                INSERT INTO services (name, category_type, sub_category, price, duration)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO services (name, category_type, sub_category, price, duration, credit_value)
+                VALUES (?, ?, ?, ?, ?, ?)
             """, sample_services)
 
 init_db()
@@ -180,7 +177,7 @@ BOOKING_TEMPLATE = """
                 <label class="block text-sm font-bold mb-1">选择服务项目</label>
                 <select name="service_id" class="w-full border rounded p-2" required>
                     {% for item in services %}
-                    <option value="{{ item.id }}">{{ item.name }} - ￥{{ "%.2f"|format(item.price) }} ({{ item.duration }}分钟)</option>
+                    <option value="{{ item.id }}">{{ item.name }} - RM {{ "%.2f"|format(item.price) }} ({{ item.duration }}分钟)</option>
                     {% endfor %}
                 </select>
             </div>
@@ -285,10 +282,10 @@ def admin_dashboard():
                     </form>
 
                     <hr class="my-4">
-                    <h3 class="font-bold mb-2">添加特定临时休息日 (特殊假期/闭店)</h3>
+                    <h3 class="font-bold mb-2">添加特定临时休息日</h3>
                     <form action="/admin/holiday/add" method="POST" class="flex gap-2">
                         <input type="date" name="date_str" class="border rounded p-2" required>
-                        <input type="text" name="reason" placeholder="休息原因 (如: 员工培训/春节假期)" class="border rounded p-2 flex-grow">
+                        <input type="text" name="reason" placeholder="休息原因 (如: 公共假期/员工培训)" class="border rounded p-2 flex-grow">
                         <button class="bg-red-500 text-white px-4 py-2 rounded font-bold hover:bg-red-600">添加闭店日</button>
                     </form>
                     
@@ -311,14 +308,14 @@ def admin_dashboard():
                 <div class="bg-white p-6 rounded shadow">
                     <h2 class="text-xl font-bold mb-4">项目与充值套餐管理</h2>
                     <table class="w-full text-left">
-                        <thead><tr class="border-b"><th class="p-2">大分类</th><th class="p-2">名称</th><th class="p-2">价格 / 面额</th><th class="p-2">耗时</th><th class="p-2">操作</th></tr></thead>
+                        <thead><tr class="border-b"><th class="p-2">分类</th><th class="p-2">名称</th><th class="p-2">售价 (RM)</th><th class="p-2">获得 Credit (RM)</th><th class="p-2">操作</th></tr></thead>
                         <tbody>
                             {% for item in services %}
                             <tr class="border-b">
                                 <td class="p-2 font-bold text-indigo-600">{{ item.category_type }}</td>
                                 <td class="p-2">{{ item.name }}</td>
-                                <td class="p-2 font-bold text-red-600">￥{{ "%.2f"|format(item.price) }}</td>
-                                <td class="p-2">{{ item.duration }}分钟</td>
+                                <td class="p-2 font-bold text-red-600">RM {{ "%.2f"|format(item.price) }}</td>
+                                <td class="p-2 font-bold text-green-600">{% if item.category_type == 'Packages' %}RM {{ "%.2f"|format(item.credit_value) }}{% else %}-{% endif %}</td>
                                 <td class="p-2">
                                     <a href="/admin/service/delete/{{ item.id }}" onclick="return confirm('确定要删除吗？')" class="text-red-500 text-sm font-bold">删除</a>
                                 </td>
@@ -334,33 +331,43 @@ def admin_dashboard():
                 <h2 class="text-xl font-bold mb-4">添加服务或储值套餐</h2>
                 <form action="/admin/service/add" method="POST">
                     <div class="mb-3">
-                        <label class="block text-sm font-medium">名称 (如: 剪发 / 充值1000送200)</label>
+                        <label class="block text-sm font-medium">名称 (如: 剪发 / 1000送200)</label>
                         <input type="text" name="name" class="w-full border rounded p-2" required>
                     </div>
                     <div class="mb-3">
                         <label class="block text-sm font-medium">分类类型</label>
-                        <select name="category_type" class="w-full border rounded p-2">
+                        <select name="category_type" id="cat_type_select" onchange="toggleCreditInput(this)" class="w-full border rounded p-2">
                             <option value="Services">Services (服务项目)</option>
                             <option value="Packages">Packages (储值套餐)</option>
                             <option value="Products">Products (零售产品)</option>
                         </select>
                     </div>
                     <div class="mb-3">
-                        <label class="block text-sm font-medium">子分类描述</label>
-                        <input type="text" name="sub_category" class="w-full border rounded p-2" value="标准分类" required>
-                    </div>
-                    <div class="mb-3">
-                        <label class="block text-sm font-medium">价格 / 充值金额 (￥)</label>
+                        <label class="block text-sm font-medium">售价 / 实际收取金额 (RM)</label>
                         <input type="number" step="0.01" name="price" class="w-full border rounded p-2" required>
                     </div>
+                    <div class="mb-3" id="credit_value_div" style="display:none;">
+                        <label class="block text-sm font-medium text-green-600 font-bold">顾客账户实际增加的 Credit 金额 (RM)</label>
+                        <input type="number" step="0.01" name="credit_value" class="w-full border rounded p-2" placeholder="例如: 1200">
+                    </div>
                     <div class="mb-4">
-                        <label class="block text-sm font-medium">耗时 (分钟，套餐填0)</label>
+                        <label class="block text-sm font-medium">服务耗时 (分钟，套餐填0)</label>
                         <input type="number" name="duration" class="w-full border rounded p-2" value="30" required>
                     </div>
                     <button class="w-full bg-indigo-600 text-white font-bold py-2 rounded hover:bg-indigo-700">确认添加</button>
                 </form>
             </div>
         </div>
+        <script>
+            function toggleCreditInput(sel) {
+                const div = document.getElementById('credit_value_div');
+                if (sel.value === 'Packages') {
+                    div.style.display = 'block';
+                } else {
+                    div.style.display = 'none';
+                }
+            }
+        </script>
     """), services=services, holidays=holidays, open_time=open_time, close_time=close_time, closed_wd=closed_wd)
 
 @app.route("/admin/settings/update", methods=["POST"])
@@ -399,11 +406,14 @@ def delete_holiday(id):
 def add_service():
     name = request.form.get("name")
     cat = request.form.get("category_type")
-    sub_cat = request.form.get("sub_category")
     price = float(request.form.get("price", 0))
     duration = int(request.form.get("duration", 30))
+    credit_value = float(request.form.get("credit_value", 0)) if cat == 'Packages' else 0.0
     with get_db() as conn:
-        conn.execute("INSERT INTO services (name, category_type, sub_category, price, duration) VALUES (?, ?, ?, ?, ?)", (name, cat, sub_cat, price, duration))
+        conn.execute("""
+            INSERT INTO services (name, category_type, sub_category, price, duration, credit_value) 
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (name, cat, cat, price, duration, credit_value))
     return redirect(url_for("admin_dashboard"))
 
 @app.route("/admin/service/delete/<int:id>")
@@ -420,45 +430,77 @@ def admin_customers():
         customers = conn.execute("""
             SELECT c.*, 
                    (SELECT COUNT(*) FROM appointments WHERE customer_id = c.id) as app_count,
-                   (SELECT COUNT(*) FROM orders WHERE customer_id = c.id) as order_count
+                   (SELECT COUNT(*) FROM orders WHERE customer_id = c.id AND status = 'NORMAL') as order_count
             FROM customers c 
             ORDER BY c.id DESC
         """).fetchall()
     return render_template_string(LAYOUT_TEMPLATE.replace("{% block content %}{% endblock %}", """
-        <div class="bg-white p-6 rounded shadow">
-            <h2 class="text-xl font-bold mb-4">会员与历史消费档案管理</h2>
-            <table class="w-full text-left border-collapse">
-                <thead>
-                    <tr class="border-b bg-gray-50">
-                        <th class="p-2">会员姓名</th>
-                        <th class="p-2">电话号码</th>
-                        <th class="p-2">储值余额 (Credit)</th>
-                        <th class="p-2">预约次数</th>
-                        <th class="p-2">消费订单数</th>
-                        <th class="p-2">顾客专属链接 (Client Link)</th>
-                        <th class="p-2">操作</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {% for c in customers %}
-                    <tr class="border-b">
-                        <td class="p-2 font-bold">{{ c.name }}</td>
-                        <td class="p-2">{{ c.phone }}</td>
-                        <td class="p-2 text-green-600 font-bold">￥{{ "%.2f"|format(c.credits) }}</td>
-                        <td class="p-2">{{ c.app_count }} 次</td>
-                        <td class="p-2">{{ c.order_count }} 单</td>
-                        <td class="p-2">
-                            <a href="/customer/{{ c.token }}" target="_blank" class="text-indigo-600 underline text-sm font-bold">打开专属页面</a>
-                        </td>
-                        <td class="p-2">
-                            <a href="/admin/customer/detail/{{ c.id }}" class="bg-indigo-50 text-indigo-700 px-3 py-1 rounded text-sm font-bold hover:bg-indigo-100">查看消费历史</a>
-                        </td>
-                    </tr>
-                    {% endfor %}
-                </tbody>
-            </table>
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+            <div class="md:col-span-2 bg-white p-6 rounded shadow">
+                <h2 class="text-xl font-bold mb-4">会员列表与历史档案</h2>
+                <table class="w-full text-left border-collapse">
+                    <thead>
+                        <tr class="border-b bg-gray-50">
+                            <th class="p-2">姓名</th>
+                            <th class="p-2">电话</th>
+                            <th class="p-2">Credit 余额</th>
+                            <th class="p-2">专属链接</th>
+                            <th class="p-2">操作</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for c in customers %}
+                        <tr class="border-b">
+                            <td class="p-2 font-bold">{{ c.name }}</td>
+                            <td class="p-2">{{ c.phone }}</td>
+                            <td class="p-2 text-green-600 font-bold">RM {{ "%.2f"|format(c.credits) }}</td>
+                            <td class="p-2">
+                                <a href="/customer/{{ c.token }}" target="_blank" class="text-indigo-600 underline text-sm font-bold">查看页面</a>
+                            </td>
+                            <td class="p-2">
+                                <a href="/admin/customer/detail/{{ c.id }}" class="bg-indigo-50 text-indigo-700 px-3 py-1 rounded text-sm font-bold hover:bg-indigo-100">消费历史</a>
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+            
+            <!-- 手动添加会员 -->
+            <div class="bg-white p-6 rounded shadow h-fit">
+                <h2 class="text-xl font-bold mb-4">手动添加会员档案</h2>
+                <form action="/admin/customer/add" method="POST">
+                    <div class="mb-3">
+                        <label class="block text-sm font-medium">会员姓名</label>
+                        <input type="text" name="name" class="w-full border rounded p-2" required>
+                    </div>
+                    <div class="mb-3">
+                        <label class="block text-sm font-medium">电话号码 (唯一凭证)</label>
+                        <input type="text" name="phone" class="w-full border rounded p-2" required>
+                    </div>
+                    <div class="mb-4">
+                        <label class="block text-sm font-medium">初始赠送 Credit (RM)</label>
+                        <input type="number" step="0.01" name="credits" class="w-full border rounded p-2" value="0.00">
+                    </div>
+                    <button class="w-full bg-indigo-600 text-white font-bold py-2 rounded hover:bg-indigo-700">保存会员</button>
+                </form>
+            </div>
         </div>
     """), customers=customers)
+
+@app.route("/admin/customer/add", methods=["POST"])
+@admin_required
+def admin_add_customer():
+    name = request.form.get("name")
+    phone = request.form.get("phone")
+    credits = float(request.form.get("credits", 0))
+    token = secrets.token_hex(8)
+    with get_db() as conn:
+        try:
+            conn.execute("INSERT INTO customers (name, phone, token, credits) VALUES (?, ?, ?, ?)", (name, phone, token, credits))
+        except:
+            pass
+    return redirect(url_for("admin_customers"))
 
 @app.route("/admin/customer/detail/<int:id>")
 @admin_required
@@ -484,18 +526,18 @@ def admin_customer_detail(id):
             <div class="flex justify-between items-center border-b pb-4">
                 <div>
                     <h2 class="text-2xl font-bold text-indigo-600">{{ cust.name }} 的会员档案</h2>
-                    <p class="text-gray-600">电话: {{ cust.phone }} | 专属链接 Token: {{ cust.token }}</p>
+                    <p class="text-gray-600">电话: {{ cust.phone }}</p>
                 </div>
                 <div class="text-right">
-                    <div class="text-sm text-gray-500">账户储值余额</div>
-                    <div class="text-2xl font-bold text-green-600">￥{{ "%.2f"|format(cust.credits) }}</div>
+                    <div class="text-sm text-gray-500">账户 Credit 余额</div>
+                    <div class="text-2xl font-bold text-green-600">RM {{ "%.2f"|format(cust.credits) }}</div>
                 </div>
             </div>
 
             <div>
                 <h3 class="text-lg font-bold mb-2">历史预约记录</h3>
                 <table class="w-full text-left border-collapse">
-                    <thead><tr class="border-b bg-gray-50"><th class="p-2">预约时间段</th><th class="p-2">服务项目</th><th class="p-2">发型师</th><th class="p-2">状态</th></tr></thead>
+                    <thead><tr class="border-b bg-gray-50"><th class="p-2">时间段</th><th class="p-2">服务项目</th><th class="p-2">发型师</th><th class="p-2">状态</th></tr></thead>
                     <tbody>
                         {% for a in appointments %}
                         <tr class="border-b"><td class="p-2">{{ a.start_time }} ~ {{ a.end_time.split()[1] }}</td><td class="p-2">{{ a.service_name }}</td><td class="p-2">{{ a.stylist }}</td><td class="p-2 text-green-600 font-bold">{{ a.status }}</td></tr>
@@ -509,10 +551,16 @@ def admin_customer_detail(id):
             <div>
                 <h3 class="text-lg font-bold mb-2">历史消费与订单明细</h3>
                 <table class="w-full text-left border-collapse">
-                    <thead><tr class="border-b bg-gray-50"><th class="p-2">订单号</th><th class="p-2">消费时间</th><th class="p-2">项目/商品</th><th class="p-2">金额</th><th class="p-2">支付方式</th></tr></thead>
+                    <thead><tr class="border-b bg-gray-50"><th class="p-2">单号</th><th class="p-2">时间</th><th class="p-2">项目/套餐</th><th class="p-2">金额</th><th class="p-2">状态</th></tr></thead>
                     <tbody>
                         {% for o in orders %}
-                        <tr class="border-b"><td class="p-2 font-bold">{{ o.order_no }}</td><td class="p-2">{{ o.created_at }}</td><td class="p-2">{{ o.item_name }}</td><td class="p-2 text-red-600 font-bold">￥{{ "%.2f"|format(o.price) }}</td><td class="p-2">{{ o.payment_details }}</td></tr>
+                        <tr class="border-b {% if o.status == 'VOID' %}bg-red-50 text-gray-400 line-through{% endif %}">
+                            <td class="p-2 font-bold">{{ o.order_no }}</td>
+                            <td class="p-2">{{ o.created_at }}</td>
+                            <td class="p-2">{{ o.item_name }}</td>
+                            <td class="p-2 font-bold">RM {{ "%.2f"|format(o.price) }}</td>
+                            <td class="p-2 font-bold">{{ '已作废' if o.status == 'VOID' else o.payment_details }}</td>
+                        </tr>
                         {% else %}
                         <tr><td colspan="5" class="p-2 text-gray-400">暂无消费订单</td></tr>
                         {% endfor %}
@@ -547,7 +595,7 @@ def admin_appointments():
                         <th class="p-2">电话</th>
                         <th class="p-2">服务项目</th>
                         <th class="p-2">发型师</th>
-                        <th class="p-2">状态 / 操作</th>
+                        <th class="p-2">操作</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -588,30 +636,32 @@ def admin_orders():
         """).fetchall()
     return render_template_string(LAYOUT_TEMPLATE.replace("{% block content %}{% endblock %}", """
         <div class="bg-white p-6 rounded shadow">
-            <h2 class="text-xl font-bold mb-4">历史订单管理与删除</h2>
+            <h2 class="text-xl font-bold mb-4">历史订单管理 (作废订单将自动归档保留)</h2>
             <table class="w-full text-left border-collapse">
                 <thead>
                     <tr class="border-b bg-gray-50">
                         <th class="p-2">单号</th>
                         <th class="p-2">时间</th>
                         <th class="p-2">顾客姓名</th>
-                        <th class="p-2">电话</th>
-                        <th class="p-2">金额</th>
-                        <th class="p-2">支付方式</th>
+                        <th class="p-2">金额 (RM)</th>
+                        <th class="p-2">支付/状态</th>
                         <th class="p-2">操作</th>
                     </tr>
                 </thead>
                 <tbody>
                     {% for order in orders %}
-                    <tr class="border-b">
+                    <tr class="border-b {% if order.status == 'VOID' %}bg-red-50 text-gray-400 line-through{% endif %}">
                         <td class="p-2 font-bold text-indigo-600">{{ order.order_no }}</td>
                         <td class="p-2">{{ order.created_at }}</td>
-                        <td class="p-2">{{ order.customer_name }}</td>
-                        <td class="p-2">{{ order.customer_phone }}</td>
-                        <td class="p-2 text-red-600 font-bold">￥{{ "%.2f"|format(order.total_amount) }}</td>
-                        <td class="p-2">{{ order.payment_details }}</td>
+                        <td class="p-2">{{ order.customer_name }} ({{ order.customer_phone }})</td>
+                        <td class="p-2 font-bold">RM {{ "%.2f"|format(order.total_amount) }}</td>
+                        <td class="p-2 font-bold">{% if order.status == 'VOID' %}<span class="text-red-600">【已作废】</span>{% else %}{{ order.payment_details }}{% endif %}</td>
                         <td class="p-2">
-                            <a href="/admin/order/delete/{{ order.id }}" onclick="return confirm('确定要删除此订单吗？')" class="text-red-500 font-bold text-sm">删除订单</a>
+                            {% if order.status != 'VOID' %}
+                            <a href="/admin/order/void/{{ order.id }}" onclick="return confirm('确定要作废此订单吗？若涉及充值或余额扣款将自动回滚。')" class="text-red-500 font-bold text-sm">作废订单</a>
+                            {% else %}
+                            <span class="text-gray-400 text-sm">已归档</span>
+                            {% endif %}
                         </td>
                     </tr>
                     {% endfor %}
@@ -620,11 +670,35 @@ def admin_orders():
         </div>
     """), orders=orders)
 
-@app.route("/admin/order/delete/<int:id>")
+@app.route("/admin/order/void/<int:id>")
 @admin_required
-def delete_order(id):
+def void_order(id):
     with get_db() as conn:
-        conn.execute("DELETE FROM orders WHERE id = ?", (id,))
+        cursor = conn.cursor()
+        order = cursor.execute("SELECT * FROM orders WHERE id = ? AND status = 'NORMAL'", (id,)).fetchone()
+        if not order:
+            return redirect(url_for("admin_orders"))
+        
+        cust_id = order["customer_id"]
+        total = order["total_amount"]
+        payment = order["payment_details"]
+        
+        items = cursor.execute("SELECT * FROM order_items WHERE order_id = ?", (id,)).fetchall()
+        cust = cursor.execute("SELECT credits FROM customers WHERE id = ?", (cust_id,)).fetchone()
+        current_credits = cust["credits"] if cust else 0.0
+        
+        # 回滚 Credit 余额变动
+        for item in items:
+            srv = cursor.execute("SELECT credit_value FROM services WHERE name = ?", (item["item_name"],)).fetchone()
+            if srv and srv["credit_value"] > 0:
+                current_credits -= srv["credit_value"]
+        
+        if payment == "Credit Balance Deduct":
+            current_credits += total
+            
+        cursor.execute("UPDATE customers SET credits = ? WHERE id = ?", (max(0.0, current_credits), cust_id))
+        cursor.execute("UPDATE orders SET status = 'VOID' WHERE id = ?", (id,))
+        
     return redirect(url_for("admin_orders"))
 
 @app.route("/admin/pos")
@@ -642,7 +716,7 @@ def admin_pos():
                     <button onclick="addToOrder('{{ item.name }}', {{ item.price }})" class="p-4 border rounded hover:bg-indigo-50 text-left">
                         <div class="text-xs text-indigo-600 font-bold">{{ item.category_type }}</div>
                         <div class="font-bold text-lg">{{ item.name }}</div>
-                        <div class="text-gray-600">￥{{ "%.2f"|format(item.price) }}</div>
+                        <div class="text-gray-600">RM {{ "%.2f"|format(item.price) }}</div>
                     </button>
                     {% endfor %}
                 </div>
@@ -653,16 +727,16 @@ def admin_pos():
                     <p class="text-gray-400">点击左侧项目加入订单</p>
                 </div>
                 <div class="text-xl font-bold mb-4">
-                    总金额: <span id="total-amount" class="text-red-600">￥0.00</span>
+                    总金额: <span id="total-amount" class="text-red-600">RM 0.00</span>
                 </div>
                 <form action="/admin/checkout" method="POST">
                     <input type="hidden" name="cart_data" id="cart_data_input">
                     <div class="mb-3">
-                        <label class="block text-sm font-medium">选择已有会员 (或下方直接输入新客)</label>
+                        <label class="block text-sm font-medium">选择已有会员</label>
                         <select name="customer_phone" id="cust_select" onchange="fillCustomer(this)" class="w-full border rounded p-2">
                             <option value="">-- 新客或手动输入 --</option>
                             {% for c in customers %}
-                            <option value="{{ c.phone }}" data-name="{{ c.name }}">{{ c.name }} ({{ c.phone }}) - 余额: ￥{{ c.credits }}</option>
+                            <option value="{{ c.phone }}" data-name="{{ c.name }}">{{ c.name }} ({{ c.phone }}) - 余额: RM {{ c.credits }}</option>
                             {% endfor %}
                         </select>
                     </div>
@@ -679,7 +753,7 @@ def admin_pos():
                         <select name="payment_method" class="w-full border rounded p-2">
                             <option value="Cash">Cash (现金)</option>
                             <option value="Credit Card">Credit Card (刷卡)</option>
-                            <option value="QRPay">QRPay (扫码)</option>
+                            <option value="TNG / QRPay">TNG / QRPay (电子钱包)</option>
                             <option value="Credit Balance Deduct">Credit Balance Deduct (储值余额扣款)</option>
                         </select>
                     </div>
@@ -699,9 +773,9 @@ def admin_pos():
                 container.innerHTML = '';
                 cart.forEach((item) => {
                     total += item.price;
-                    container.innerHTML += `<div class="flex justify-between py-1"><span>${item.name}</span><span>￥${item.price.toFixed(2)}</span></div>`;
+                    container.innerHTML += `<div class="flex justify-between py-1"><span>${item.name}</span><span>RM ${item.price.toFixed(2)}</span></div>`;
                 });
-                document.getElementById('total-amount').innerText = '￥' + total.toFixed(2);
+                document.getElementById('total-amount').innerText = 'RM ' + total.toFixed(2);
                 document.getElementById('cart_data_input').value = JSON.stringify(cart);
             }
             function fillCustomer(select) {
@@ -739,26 +813,22 @@ def checkout():
                 cust_id = cursor.lastrowid
                 current_credits = 0.0
             
-            # 如果购买了充值套餐，给会员自动加余额
+            # 自动计算并增加充值套餐对应的 Credit 余额
             for item in cart_data:
-                if "充值" in item["name"]:
-                    # 解析套餐赠送金额，例如 "充值 1000 元送 200" 自动加 1200
-                    add_val = item["price"]
-                    if "1000" in item["name"]: add_val = 1200.0
-                    elif "500" in item["name"]: add_val = 580.0
-                    current_credits += add_val
+                srv = cursor.execute("SELECT credit_value FROM services WHERE name = ?", (item["name"],)).fetchone()
+                if srv and srv["credit_value"] > 0:
+                    current_credits += srv["credit_value"]
                     cursor.execute("UPDATE customers SET credits = ? WHERE id = ?", (current_credits, cust_id))
 
-            # 如果使用储值余额扣款
             if pay_method == "Credit Balance Deduct":
                 if current_credits < total:
-                    return "结算失败：该顾客储值余额不足！", 400
+                    return "结算失败：该顾客 Credit 余额不足！", 400
                 current_credits -= total
                 cursor.execute("UPDATE customers SET credits = ? WHERE id = ?", (current_credits, cust_id))
                 
             cursor.execute("""
-                INSERT INTO orders (order_no, customer_id, total_amount, payment_details, created_at) 
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO orders (order_no, customer_id, total_amount, payment_details, status, created_at) 
+                VALUES (?, ?, ?, ?, 'NORMAL', ?)
             """, (order_no, cust_id, total, pay_method, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
             order_id = cursor.lastrowid
             
@@ -774,8 +844,8 @@ def checkout():
                 <hr>
                 <p><strong>单号：</strong> {order_no}</p>
                 <p><strong>顾客：</strong> {name} ({phone})</p>
-                <p><strong>金额：</strong> ￥{total:.2f} ({pay_method})</p>
-                <p><strong>顾客个人专属链接：</strong> <a href="/customer/{cust_token}" target="_blank">点击查看 / 发送给顾客</a></p>
+                <p><strong>金额：</strong> RM {total:.2f} ({pay_method})</p>
+                <p><strong>顾客专属个人链接：</strong> <a href="/customer/{cust_token}" target="_blank">点击查看 / 发送给顾客</a></p>
                 <hr>
                 <a href="/admin/pos" style="color:#4f46e5;font-weight:bold;text-decoration:none;">返回 POS 收银台</a>
             </div>
@@ -797,13 +867,11 @@ def public_booking():
         c_name = request.form.get("customer_name")
         c_phone = request.form.get("customer_phone")
         
-        # 校验是否为休息日
         d_obj = datetime.strptime(b_date, "%Y-%m-%d")
         if d_obj.weekday() == closed_wd:
             return public_booking_render(error="预约失败：该日期为沙龙固定休息日，请选择其他日期！")
             
         with get_db() as conn:
-            # 校验临时假期
             holiday = conn.execute("SELECT * FROM holidays WHERE date_str = ?", (b_date,)).fetchone()
             if holiday:
                 return public_booking_render(error=f"预约失败：该天为临时闭店日 ({holiday.reason})，无法预约！")
@@ -816,7 +884,6 @@ def public_booking():
             start_str = start_dt.strftime("%Y-%m-%d %H:%M")
             end_str = end_dt.strftime("%Y-%m-%d %H:%M")
             
-            # 防冲突检查
             conflict = conn.execute("""
                 SELECT id FROM appointments 
                 WHERE stylist = ? AND status = 'CONFIRMED' 
@@ -850,7 +917,7 @@ def public_booking():
                 <p><strong>时间：</strong>{start_str} ~ {end_str.split()[1]}</p>
                 <p><strong>发型师：</strong>{stylist}</p>
                 <hr style="margin:20px 0;">
-                <p>这是您的<strong>专属会员与历史记录链接</strong>（建议长按复制保存）：</p>
+                <p>这是您的<strong>专属会员与历史记录链接</strong>：</p>
                 <a href="/customer/{cust_token}" style="display:inline-block;padding:10px 15px;background:#4f46e5;color:white;text-decoration:none;border-radius:5px;font-weight:bold;">点此进入我的会员专属页</a>
             </div>
         """
@@ -894,8 +961,8 @@ def customer_profile(token):
             <p><strong>姓名：</strong> {{ cust.name }}</p>
             <p><strong>电话：</strong> {{ cust.phone }}</p>
             <div style="background:#f0fdf4;border:1px solid #bbf7d0;padding:12px;border-radius:6px;margin:15px 0;">
-                <span style="font-size:14px;color:#166534;">当前储值余额 (Credit Balance)：</span>
-                <div style="font-size:24px;font-weight:bold;color:#15803d;">￥{{ "%.2f"|format(cust.credits) }}</div>
+                <span style="font-size:14px;color:#166534;">当前 Credit 余额：</span>
+                <div style="font-size:24px;font-weight:bold;color:#15803d;">RM {{ "%.2f"|format(cust.credits) }}</div>
             </div>
             <hr>
             <h3>我的预约记录</h3>
@@ -913,7 +980,10 @@ def customer_profile(token):
             {% if orders %}
             <ul style="padding-left:20px;font-size:14px;">
                 {% for o in orders %}
-                <li style="margin-bottom:6px;">{{ o.created_at }} - <strong>{{ o.item_name }}</strong> (￥{{ "%.2f"|format(o.price) }}) [支付: {{ o.payment_details }}]</li>
+                <li style="margin-bottom:6px; {% if o.status == 'VOID' %}color:#9ca3af;text-decoration:line-through;{% endif %}">
+                    {{ o.created_at }} - <strong>{{ o.item_name }}</strong> (RM {{ "%.2f"|format(o.price) }}) 
+                    {% if o.status == 'VOID' %}<span style="color:red;font-weight:bold;">[已作废]</span>{% else %}[支付: {{ o.payment_details }}]{% endif %}
+                </li>
                 {% endfor %}
             </ul>
             {% else %}
@@ -926,28 +996,28 @@ def customer_profile(token):
 @admin_required
 def admin_reports():
     with get_db() as conn:
-        order_count = conn.execute("SELECT COUNT(*) FROM orders").fetchone()[0]
-        total_revenue = conn.execute("SELECT SUM(total_amount) FROM orders").fetchone()[0] or 0.0
+        order_count = conn.execute("SELECT COUNT(*) FROM orders WHERE status = 'NORMAL'").fetchone()[0]
+        total_revenue = conn.execute("SELECT SUM(total_amount) FROM orders WHERE status = 'NORMAL'").fetchone()[0] or 0.0
         customer_count = conn.execute("SELECT COUNT(*) FROM customers").fetchone()[0]
-        item_count = conn.execute("SELECT COUNT(*) FROM order_items").fetchone()[0]
+        item_count = conn.execute("SELECT COUNT(*) FROM order_items i JOIN orders o ON i.order_id = o.id WHERE o.status = 'NORMAL'").fetchone()[0]
     return render_template_string(LAYOUT_TEMPLATE.replace("{% block content %}{% endblock %}", """
         <div class="bg-white p-6 rounded shadow">
             <h2 class="text-xl font-bold mb-6 border-b pb-2">90天历史数据看板</h2>
             <div class="grid grid-cols-2 md:grid-cols-4 gap-4 text-center">
                 <div class="bg-indigo-50 p-4 rounded shadow">
-                    <div class="text-gray-500 text-sm">订单总量</div>
+                    <div class="text-gray-500 text-sm">有效订单数</div>
                     <div class="text-3xl font-bold text-indigo-600">{{ order_count }}</div>
                 </div>
                 <div class="bg-green-50 p-4 rounded shadow">
-                    <div class="text-gray-500 text-sm">总营业额</div>
-                    <div class="text-3xl font-bold text-green-600">￥{{ "%.2f"|format(total_revenue) }}</div>
+                    <div class="text-gray-500 text-sm">总营业额 (RM)</div>
+                    <div class="text-3xl font-bold text-green-600">RM {{ "%.2f"|format(total_revenue) }}</div>
                 </div>
                 <div class="bg-yellow-50 p-4 rounded shadow">
                     <div class="text-gray-500 text-sm">项目销售量</div>
                     <div class="text-3xl font-bold text-yellow-600">{{ item_count }}</div>
                 </div>
                 <div class="bg-purple-50 p-4 rounded shadow">
-                    <div class="text-gray-500 text-sm">顾客总数</div>
+                    <div class="text-gray-500 text-sm">会员总数</div>
                     <div class="text-3xl font-bold text-purple-600">{{ customer_count }}</div>
                 </div>
             </div>
