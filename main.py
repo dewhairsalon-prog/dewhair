@@ -94,7 +94,6 @@ def init_db():
             );
         """)
         
-        # 兼容旧表升级：检查并添加字段
         try:
             conn.execute("ALTER TABLE order_items ADD COLUMN staff_name TEXT DEFAULT ''")
         except sqlite3.OperationalError:
@@ -1570,79 +1569,80 @@ def customer_profile(token):
             WHERE a.customer_id = ?
             ORDER BY a.start_time DESC
         """, (cust["id"],)).fetchall()
+        
     return render_template_string("""
-        <div style="max-width:550px;margin:30px auto;padding:25px;border:1px solid #ccc;font-family:sans-serif;border-radius:8px;background:#fff;">
-            <div style="display:flex;justify-content:space-between;align-items:center;">
-                <h2 style="color:#4f46e5;margin:0;">Dew Hair Salon - My Portal</h2>
-                <button onclick="window.print()" style="background:#10b981;color:white;border:none;padding:8px 12px;border-radius:6px;font-weight:bold;cursor:pointer;">📥 下载我的账单/凭证</button>
+        <!DOCTYPE html>
+        <html lang="zh-CN">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>{{ cust.name }} 的会员中心 - Dew Hair Salon</title>
+            <script src="https://cdn.tailwindcss.com"></script>
+        </head>
+        <body class="bg-gray-50 min-h-screen p-4 md:p-8">
+            <div class="max-w-3xl mx-auto bg-white p-6 md:p-8 rounded-xl shadow-md space-y-6">
+                <div class="flex flex-col md:flex-row justify-between items-start md:items-center border-b pb-4 gap-4">
+                    <div>
+                        <h2 class="text-2xl font-extrabold text-indigo-600">🌟 欢迎光临, {{ cust.name }}!</h2>
+                        <p class="text-gray-500 text-sm mt-1">手机号码: {{ cust.phone }}</p>
+                    </div>
+                    <div class="bg-green-50 border border-green-200 px-4 py-3 rounded-lg text-right">
+                        <div class="text-xs text-green-700 font-bold">账户储值 Credit 余额</div>
+                        <div class="text-2xl font-black text-green-600">RM {{ "%.2f"|format(cust.credits) }}</div>
+                    </div>
+                </div>
+
+                <div>
+                    <h3 class="text-lg font-bold mb-3 text-gray-800">📅 我的预约记录</h3>
+                    <div class="border rounded-lg overflow-x-auto">
+                        <table class="w-full text-left text-sm">
+                            <thead><tr class="bg-gray-50 border-b"><th class="p-3">时间段</th><th class="p-3">项目</th><th class="p-3">发型师</th><th class="p-3">状态</th></tr></thead>
+                            <tbody>
+                                {% for a in appointments %}
+                                <tr class="border-b">
+                                    <td class="p-3 font-semibold text-indigo-600">{{ a.start_time }} ~ {{ a.end_time.split()[1] }}</td>
+                                    <td class="p-3">{{ a.service_name }}</td>
+                                    <td class="p-3">{{ a.stylist }}</td>
+                                    <td class="p-3"><span class="bg-green-100 text-green-800 px-2 py-0.5 rounded text-xs font-bold">{{ a.status }}</span></td>
+                                </tr>
+                                {% else %}
+                                <tr><td colspan="4" class="p-4 text-center text-gray-400">暂无预约记录</td></tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <div>
+                    <h3 class="text-lg font-bold mb-3 text-gray-800">🛍️ 历史消费与收据明细</h3>
+                    <div class="border rounded-lg overflow-x-auto">
+                        <table class="w-full text-left text-sm">
+                            <thead><tr class="bg-gray-50 border-b"><th class="p-3">单号</th><th class="p-3">时间</th><th class="p-3">项目</th><th class="p-3">金额</th><th class="p-3">支付方式</th></tr></thead>
+                            <tbody>
+                                {% for o in orders %}
+                                <tr class="border-b {% if o.status == 'VOID' %}bg-red-50 text-gray-400 line-through{% endif %}">
+                                    <td class="p-3 font-bold">{{ o.order_no }}</td>
+                                    <td class="p-3">{{ o.created_at }}</td>
+                                    <td class="p-3">{{ o.item_name }}</td>
+                                    <td class="p-3 font-bold">RM {{ "%.2f"|format(o.price) }}</td>
+                                    <td class="p-3 font-bold">{{ '已作废' if o.status == 'VOID' else o.payment_details }}</td>
+                                </tr>
+                                {% else %}
+                                <tr><td colspan="5" class="p-4 text-center text-gray-400">暂无消费明细</td></tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+                
+                <div class="text-center pt-4">
+                    <a href="/book" class="inline-block bg-indigo-600 text-white font-bold px-6 py-3 rounded-lg hover:bg-indigo-700 shadow">去预约新服务</a>
+                </div>
             </div>
-            <p style="margin-top:15px;"><strong>Name:</strong> {{ cust.name }}</p>
-            <p><strong>Phone:</strong> {{ cust.phone }}</p>
-            <div style="background:#f0fdf4;border:1px solid #bbf7d0;padding:12px;border-radius:6px;margin:15px 0;">
-                <span style="font-size:14px;color:#166534;">Current Credit Balance:</span>
-                <div style="font-size:24px;font-weight:bold;color:#15803d;">RM {{ "%.2f"|format(cust.credits) }}</div>
-            </div>
-            <hr style="border:0;border-top:1px solid #eee;margin:15px 0;">
-            <h3 style="font-size:16px;">My Appointments</h3>
-            {% if appointments %}
-            <ul style="padding-left:20px;font-size:14px;">
-                {% for a in appointments %}
-                <li style="margin-bottom:8px;">{{ a.start_time }} - <strong>{{ a.service_name }}</strong> (Stylist: {{ a.stylist }}) - <span style="color:green;font-weight:bold;">{{ a.status }}</span></li>
-                {% endfor %}
-            </ul>
-            {% else %}
-            <p style="color:gray;font-size:14px;">No appointments.</p>
-            {% endif %}
-            <hr style="border:0;border-top:1px solid #eee;margin:15px 0;">
-            <h3 style="font-size:16px;">Order History & Receipts</h3>
-            {% if orders %}
-            <ul style="padding-left:20px;font-size:14px;">
-                {% for o in orders %}
-                <li style="margin-bottom:12px; {% if o.status == 'VOID' %}color:#9ca3af;text-decoration:line-through;{% endif %}">
-                    <strong>{{ o.order_no }}</strong> ({{ o.created_at }})<br>
-                    Item: {{ o.item_name }} - <strong>RM {{ "%.2f"|format(o.price) }}</strong>
-                    {% if o.status == 'VOID' %}<span style="color:red;font-weight:bold;">[VOIDED]</span>{% else %}<span style="color:#4f46e5;">[{{ o.payment_details }}]</span>{% endif %}
-                    {% if o.remark %}<br><span style="color:#d97706;font-size:13px;">Remark: {{ o.remark }}</span>{% endif %}
-                </li>
-                {% endfor %}
-            </ul>
-            {% else %}
-            <p style="color:gray;font-size:14px;">No order history.</p>
-            {% endif %}
-        </div>
+        </body>
+        </html>
     """, cust=cust, orders=orders, appointments=appointments)
 
-@app.route("/admin/reports")
-@admin_required
-def admin_reports():
-    with get_db() as conn:
-        order_count = conn.execute("SELECT COUNT(*) FROM orders WHERE status = 'NORMAL'").fetchone()[0]
-        total_revenue = conn.execute("SELECT SUM(total_amount) FROM orders WHERE status = 'NORMAL'").fetchone()[0] or 0.0
-        customer_count = conn.execute("SELECT COUNT(*) FROM customers").fetchone()[0]
-        item_count = conn.execute("SELECT COUNT(*) FROM order_items i JOIN orders o ON i.order_id = o.id WHERE o.status = 'NORMAL'").fetchone()[0]
-    return render_template_string(LAYOUT_TEMPLATE.replace("{% block content %}{% endblock %}", """
-        <div class="bg-white p-6 rounded shadow">
-            <h2 class="text-xl font-bold mb-6 border-b pb-2">90天历史数据看板</h2>
-            <div class="grid grid-cols-2 md:grid-cols-4 gap-4 text-center">
-                <div class="bg-indigo-50 p-4 rounded shadow">
-                    <div class="text-gray-500 text-sm">有效订单数</div>
-                    <div class="text-3xl font-bold text-indigo-600">{{ order_count }}</div>
-                </div>
-                <div class="bg-green-50 p-4 rounded shadow">
-                    <div class="text-gray-500 text-sm">总营业额 (RM)</div>
-                    <div class="text-3xl font-bold text-green-600">RM {{ "%.2f"|format(total_revenue) }}</div>
-                </div>
-                <div class="bg-yellow-50 p-4 rounded shadow">
-                    <div class="text-gray-500 text-sm">项目销售量</div>
-                    <div class="text-3xl font-bold text-yellow-600">{{ item_count }}</div>
-                </div>
-                <div class="prop bg-purple-50 p-4 rounded shadow">
-                    <div class="text-gray-500 text-sm">会员总数</div>
-                    <div class="text-3xl font-bold text-purple-600">{{ customer_count }}</div>
-                </div>
-            </div>
-        </div>
-    """))
-
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=10000, debug=False)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
