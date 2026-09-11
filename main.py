@@ -5,6 +5,7 @@ import hmac
 import json
 import urllib.parse
 from datetime import datetime, timedelta
+from pytz import timezone
 from functools import wraps
 from flask import (
     Flask, request, redirect, url_for, session, render_template_string, jsonify
@@ -13,6 +14,15 @@ from flask import (
 app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", secrets.token_hex(32))
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "123456")
+
+# 设置马来西亚实时时区
+MY_TZ = timezone('Asia/Kuala_Lumpur')
+
+def get_current_time():
+    return datetime.now(MY_TZ).strftime("%Y-%m-%d %H:%M:%S")
+
+def get_current_date():
+    return datetime.now(MY_TZ).strftime("%Y-%m-%d")
 
 # 彻底修复数据丢失问题：强制使用绝对持久化目录
 DB_DIR = "/opt/render/project/src" if os.path.exists("/opt/render/project/src") else "."
@@ -78,9 +88,22 @@ def init_db():
                 item_name TEXT NOT NULL,
                 price REAL NOT NULL,
                 qty INTEGER DEFAULT 1,
+                staff_name TEXT DEFAULT '',
+                commission REAL DEFAULT 0.0,
                 FOREIGN KEY(order_id) REFERENCES orders(id) ON DELETE CASCADE
             );
         """)
+        
+        # 兼容旧表升级：检查并添加字段
+        try:
+            conn.execute("ALTER TABLE order_items ADD COLUMN staff_name TEXT DEFAULT ''")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            conn.execute("ALTER TABLE order_items ADD COLUMN commission REAL DEFAULT 0.0")
+        except sqlite3.OperationalError:
+            pass
+
         conn.execute("""
             CREATE TABLE IF NOT EXISTS appointments (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -212,14 +235,54 @@ def admin_dashboard():
     close_time = get_setting("close_time", "20:00")
     closed_wd = get_setting("closed_weekdays", "1")
     
+    # 统计当月员工销售业绩与佣金
+    current_month_prefix = datetime.now(MY_TZ).strftime("%Y-%m")
     with get_db() as conn:
         services = conn.execute("SELECT * FROM services ORDER BY category_type, sub_category").fetchall()
         stylists = conn.execute("SELECT * FROM stylists ORDER BY id DESC").fetchall()
         holidays = conn.execute("SELECT * FROM holidays ORDER BY date_str DESC").fetchall()
         
+        staff_performance = conn.execute("""
+            SELECT i.staff_name, 
+                   COUNT(i.id) as item_count,
+                   SUM(i.price) as total_sales,
+                   SUM(i.commission) as total_commission
+            FROM order_items i
+            JOIN orders o ON i.order_id = o.id
+            WHERE o.status = 'NORMAL' AND o.created_at LIKE ? AND i.staff_name != '' AND i.staff_name IS NOT NULL
+            GROUP BY i.staff_name
+        """, (f"{current_month_prefix}%",)).fetchall()
+        
     return render_template_string(LAYOUT_TEMPLATE.replace("{% block content %}{% endblock %}", """
         <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
             <div class="md:col-span-2 space-y-6">
+                <!-- 当月员工佣金与业绩统计 -->
+                <div class="bg-white p-6 rounded shadow">
+                    <h2 class="text-xl font-bold mb-4 text-indigo-600">🏆 本月 ({{ current_month }}) 员工销售业绩与佣金看板</h2>
+                    <table class="w-full text-left">
+                        <thead>
+                            <tr class="border-b bg-gray-50 text-sm">
+                                <th class="p-2">员工姓名</th>
+                                <th class="p-2">服务项目数</th>
+                                <th class="p-2">总销售额 (RM)</th>
+                                <th class="p-2 text-green-700">应发佣金 (RM)</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for sp in staff_performance %}
+                            <tr class="border-b">
+                                <td class="p-2 font-bold">{{ sp.staff_name }}</td>
+                                <td class="p-2">{{ sp.item_count }}</td>
+                                <td class="p-2 font-bold">RM {{ "%.2f"|format(sp.total_sales) }}</td>
+                                <td class="p-2 font-bold text-green-600">RM {{ "%.2f"|format(sp.total_commission) }}</td>
+                            </tr>
+                            {% else %}
+                            <tr><td colspan="4" class="p-3 text-gray-400">本月暂无员工佣金结算记录</td></tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+
                 <!-- 营业与休息日设置 -->
                 <div class="bg-white p-6 rounded shadow">
                     <h2 class="text-xl font-bold mb-4">营业与休息日设置</h2>
@@ -367,7 +430,7 @@ def admin_dashboard():
                 div.style.display = (sel.value === 'Packages') ? 'block' : 'none';
             }
         </script>
-    """), services=services, stylists=stylists, holidays=holidays, open_time=open_time, close_time=close_time, closed_wd=closed_wd)
+    """), services=services, stylists=stylists, holidays=holidays, open_time=open_time, close_time=close_time, closed_wd=closed_wd, current_month=current_month_prefix, staff_performance=staff_performance)
 
 @app.route("/admin/stylist/add", methods=["POST"])
 @admin_required
@@ -785,8 +848,8 @@ ADMIN_APPOINTMENTS_TEMPLATE = """
 @app.route("/admin/appointments")
 @admin_required
 def admin_appointments():
-    selected_date = request.args.get("date", datetime.now().strftime("%Y-%m-%d"))
-    today_str = datetime.now().strftime("%Y-%m-%d")
+    selected_date = request.args.get("date", get_current_date())
+    today_str = get_current_date()
     date_strip = []
     base_dt = datetime.strptime(selected_date, "%Y-%m-%d")
     start_loop = base_dt - timedelta(days=5)
@@ -867,16 +930,41 @@ def delete_appointment(id):
 @app.route("/admin/orders")
 @admin_required
 def admin_orders():
+    search_q = request.args.get("q", "").strip()
+    date_q = request.args.get("date", "").strip()
+    
     with get_db() as conn:
-        orders = conn.execute("""
+        query = """
             SELECT o.*, c.name as customer_name, c.phone as customer_phone, c.token as customer_token 
             FROM orders o 
             JOIN customers c ON o.customer_id = c.id 
-            ORDER BY o.created_at DESC
-        """).fetchall()
+            WHERE 1=1
+        """
+        params = []
+        if search_q:
+            query += " AND (o.order_no LIKE ? OR c.name LIKE ? OR c.phone LIKE ?)"
+            params.extend([f"%{search_q}%", f"%{search_q}%", f"%{search_q}%"])
+        if date_q:
+            query += " AND o.created_at LIKE ?"
+            params.append(f"{date_q}%")
+            
+        query += " ORDER BY o.created_at DESC"
+        orders = conn.execute(query, params).fetchall()
+        
     return render_template_string(LAYOUT_TEMPLATE.replace("{% block content %}{% endblock %}", """
-        <div class="bg-white p-6 rounded shadow">
-            <h2 class="text-xl font-bold mb-4">历史订单管理与 WhatsApp 发送单据</h2>
+        <div class="bg-white p-6 rounded shadow space-y-4">
+            <div class="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
+                <h2 class="text-xl font-bold">历史订单管理与单据查询</h2>
+                <form action="/admin/orders" method="GET" class="flex flex-wrap gap-2 items-center w-full md:w-auto">
+                    <input type="date" name="date" value="{{ date_q }}" class="border rounded px-3 py-1 text-sm">
+                    <input type="text" name="q" value="{{ search_q }}" placeholder="搜单号、姓名、电话..." class="border rounded px-3 py-1 text-sm flex-grow">
+                    <button class="bg-indigo-600 text-white px-3 py-1 rounded text-sm font-bold">筛选/查询</button>
+                    {% if search_q or date_q %}
+                    <a href="/admin/orders" class="bg-gray-300 text-gray-700 px-3 py-1 rounded text-sm font-bold">重置</a>
+                    {% endif %}
+                </form>
+            </div>
+            
             <table class="w-full text-left border-collapse">
                 <thead>
                     <tr class="border-b bg-gray-50 text-sm">
@@ -906,20 +994,22 @@ def admin_orders():
                             </form>
                         </td>
                         <td class="p-2 flex gap-2 items-center text-sm">
-                            <a href="/admin/order/invoice/{{ order.id }}" class="text-indigo-600 font-bold hover:underline">查看</a>
+                            <a href="/admin/order/invoice/{{ order.id }}" class="text-indigo-600 font-bold hover:underline">查看/下载</a>
                             <a href="/admin/order/whatsapp/{{ order.id }}" target="_blank" class="bg-green-600 text-white px-2.5 py-1 rounded font-bold hover:bg-green-700 text-xs flex items-center gap-1">
-                                💬 发送 WhatsApp
+                                💬 WhatsApp
                             </a>
                             {% if order.status != 'VOID' %}
                             <a href="/admin/order/void/{{ order.id }}" onclick="return confirm('确定作废此订单吗？')" class="text-red-500 font-bold">作废</a>
                             {% endif %}
                         </td>
                     </tr>
+                    {% else %}
+                    <tr><td colspan="7" class="p-6 text-center text-gray-400">没有找到相关历史订单</td></tr>
                     {% endfor %}
                 </tbody>
             </table>
         </div>
-    """), orders=orders)
+    """), orders=orders, search_q=search_q, date_q=date_q)
 
 @app.route("/admin/order/remark/<int:id>", methods=["POST"])
 @admin_required
@@ -947,7 +1037,7 @@ def admin_order_whatsapp(id):
     msg = (
         f"🌟 *Dew Hair Salon - Official Invoice* 🌟\n\n"
         f"Hello *{order['customer_name']}*,\n"
-        f"Thank you for visiting us! Here is your receipt details:\n\n"
+        f"Thank you for visiting us! You can view and download your receipt & profile here:\n\n"
         f"🧾 *Order No:* {order['order_no']}\n"
         f"📅 *Date:* {order['created_at']}\n\n"
         f"*Purchased Items:*\n{items_str}\n\n"
@@ -957,12 +1047,11 @@ def admin_order_whatsapp(id):
     if order['remark']:
         msg += f"📝 *Remark:* {order['remark']}\n"
         
-    msg += f"\n🔗 View your member profile & credit balance here:\n{portal_link}\n\nHope to see you again soon!"
+    msg += f"\n🔗 *My Member Portal & Download Receipt:*\n{portal_link}\n\nHope to see you again soon!"
     
-    # 清理电话号码格式并拼接 WhatsApp 链接
     phone = "".join(filter(str.isdigit, order['customer_phone']))
     if phone.startswith('0'):
-        phone = '6' + phone  # 默认适配大马手机号格式 601xxxxxxx
+        phone = '6' + phone  
         
     wa_url = f"https://api.whatsapp.com/send?phone={phone}&text={urllib.parse.quote(msg)}"
     return redirect(wa_url)
@@ -990,12 +1079,25 @@ def admin_order_invoice(id):
             <p><strong>Payment Method:</strong> {{ order.payment_details }}</p>
             {% if order.remark %}<p><strong>Remark:</strong> <span style="color:#d97706;">{{ order.remark }}</span></p>{% endif %}
             <hr style="border:0;border-top:1px solid #eee;margin:15px 0;">
-            <h3 style="font-size:16px;margin-bottom:8px;">Items Purchased</h3>
+            <h3 style="font-size:16px;margin-bottom:8px;">Items Purchased & Staff Commission</h3>
             <table style="width:100%;border-collapse:collapse;font-size:14px;margin-bottom:15px;">
-                <thead><tr style="border-bottom:1px solid #ddd;background:#f9fafb;"><th style="text-align:left;padding:6px;">Item Name</th><th style="text-align:right;padding:6px;">Price (RM)</th></tr></thead>
+                <thead>
+                    <tr style="border-bottom:1px solid #ddd;background:#f9fafb;">
+                        <th style="text-align:left;padding:6px;">Item Name</th>
+                        <th style="text-align:left;padding:6px;">Staff</th>
+                        <th style="text-align:right;padding:6px;">Price & Commission</th>
+                    </tr>
+                </thead>
                 <tbody>
                     {% for item in items %}
-                    <tr style="border-bottom:1px solid #eee;"><td style="padding:6px;">{{ item.item_name }}</td><td style="text-align:right;padding:6px;">RM {{ "%.2f"|format(item.price) }}</td></tr>
+                    <tr style="border-bottom:1px solid #eee;">
+                        <td style="padding:6px;">{{ item.item_name }}</td>
+                        <td style="padding:6px;color:#4f46e5;">{{ item.staff_name or '-' }}</td>
+                        <td style="text-align:right;padding:6px;">
+                            RM {{ "%.2f"|format(item.price) }}
+                            {% if item.commission > 0 %}<br><span style="font-size:11px;color:green;">(佣金: RM {{ "%.2f"|format(item.commission) }})</span>{% endif %}
+                        </td>
+                    </tr>
                     {% endfor %}
                 </tbody>
             </table>
@@ -1003,8 +1105,9 @@ def admin_order_invoice(id):
                 Total Amount: <span style="color:#dc2626;">RM {{ "%.2f"|format(order.total_amount) }}</span>
             </div>
             <div style="display:flex;gap:10px;">
-                <a href="/admin/order/whatsapp/{{ order.id }}" target="_blank" style="flex:1;text-align:center;padding:12px;background:#10b981;color:white;text-decoration:none;border-radius:6px;font-weight:bold;">💬 Send via WhatsApp</a>
-                <a href="/admin/orders" style="flex:1;text-align:center;padding:12px;background:#4f46e5;color:white;text-decoration:none;border-radius:6px;font-weight:bold;">Back to Orders</a>
+                <button onclick="window.print()" style="flex:1;padding:12px;background:#10b981;color:white;border:none;border-radius:6px;font-weight:bold;cursor:pointer;">📥 下载/打印收据 (PDF)</button>
+                <a href="/admin/order/whatsapp/{{ order.id }}" target="_blank" style="flex:1;text-align:center;padding:12px;background:#25d366;color:white;text-decoration:none;border-radius:6px;font-weight:bold;">💬 发送 WhatsApp</a>
+                <a href="/admin/orders" style="padding:12px 15px;background:#4f46e5;color:white;text-decoration:none;border-radius:6px;font-weight:bold;">返回</a>
             </div>
         </div>
     """, order=order, items=items)
@@ -1043,6 +1146,7 @@ def void_order(id):
 def admin_pos():
     with get_db() as conn:
         services = conn.execute("SELECT * FROM services").fetchall()
+        stylists = conn.execute("SELECT * FROM stylists").fetchall()
         customers = conn.execute("SELECT * FROM customers").fetchall()
     return render_template_string(LAYOUT_TEMPLATE.replace("{% block content %}{% endblock %}", """
         <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
@@ -1060,8 +1164,9 @@ def admin_pos():
             </div>
             <div class="bg-white p-6 rounded-lg shadow">
                 <h2 class="text-xl font-bold mb-4">当前订单结账</h2>
-                <div id="order-items" class="min-h-[150px] border-b mb-4"><p class="text-gray-400">点击左侧项目加入订单</p></div>
+                <div id="order-items" class="min-h-[150px] border-b mb-4 pb-2"><p class="text-gray-400">点击左侧项目加入订单</p></div>
                 <div class="text-xl font-bold mb-4">总金额: <span id="total-amount" class="text-red-600">RM 0.00</span></div>
+                
                 <form action="/admin/checkout" method="POST">
                     <input type="hidden" name="cart_data" id="cart_data_input">
                     <div class="mb-3">
@@ -1094,19 +1199,92 @@ def admin_pos():
                 </form>
             </div>
         </div>
+        
+        <!-- 员工与佣金配置弹窗 -->
+        <div id="staffModal" class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 hidden">
+            <div class="bg-white p-6 rounded-xl shadow-xl max-w-sm w-full">
+                <h3 class="text-lg font-bold mb-3 text-indigo-600">设置服务员工与佣金</h3>
+                <p id="modal_item_name" class="text-sm font-medium text-gray-700 mb-3"></p>
+                <div class="mb-3">
+                    <label class="block text-sm font-bold mb-1">选择负责员工</label>
+                    <select id="modal_staff_name" class="w-full border rounded p-2 text-sm">
+                        <option value="">-- 无特定员工 --</option>
+                        {% for st in stylists %}
+                        <option value="{{ st.name }}">{{ st.name }} ({{ st.title }})</option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div class="mb-4">
+                    <label class="block text-sm font-bold mb-1">提成佣金金额 (RM)</label>
+                    <input type="number" step="0.01" id="modal_commission" class="w-full border rounded p-2 text-sm" value="0.00">
+                </div>
+                <div class="flex justify-end gap-2">
+                    <button type="button" onclick="closeStaffModal()" class="bg-gray-300 px-3 py-1.5 rounded text-sm font-bold">取消</button>
+                    <button type="button" onclick="saveStaffModal()" class="bg-indigo-600 text-white px-4 py-1.5 rounded text-sm font-bold">确定</button>
+                </div>
+            </div>
+        </div>
+
         <script>
             let cart = [];
-            function addToOrder(name, price) { cart.push({name, price}); renderCart(); }
+            let editingIndex = null;
+
+            function addToOrder(name, price) {
+                // 默认给予项目价格 10% 作为默认参考佣金或设为 0
+                cart.push({name, price, staff: '', commission: 0});
+                renderCart();
+            }
+
+            function openStaffModal(index) {
+                editingIndex = index;
+                const item = cart[index];
+                document.getElementById('modal_item_name').innerText = "项目: " + item.name + " (售价: RM " + item.price.toFixed(2) + ")";
+                document.getElementById('modal_staff_name').value = item.staff || '';
+                document.getElementById('modal_commission').value = item.commission || 0;
+                document.getElementById('staffModal').classList.remove('hidden');
+            }
+
+            function closeStaffModal() {
+                document.getElementById('staffModal').classList.add('hidden');
+                editingIndex = null;
+            }
+
+            function saveStaffModal() {
+                if(editingIndex !== null) {
+                    cart[editingIndex].staff = document.getElementById('modal_staff_name').value;
+                    cart[editingIndex].commission = parseFloat(document.getElementById('modal_commission').value) || 0;
+                    renderCart();
+                }
+                closeStaffModal();
+            }
+
+            function removeFromCart(index) {
+                cart.splice(index, 1);
+                renderCart();
+            }
+
             function renderCart() {
                 const container = document.getElementById('order-items');
                 let total = 0; container.innerHTML = '';
-                cart.forEach((item) => {
+                cart.forEach((item, index) => {
                     total += item.price;
-                    container.innerHTML += `<div class="flex justify-between py-1"><span>${item.name}</span><span>RM ${item.price.toFixed(2)}</span></div>`;
+                    container.innerHTML += `
+                        <div class="flex justify-between items-center py-2 border-b text-sm">
+                            <div>
+                                <div class="font-bold">${item.name}</div>
+                                <div class="text-xs text-gray-500">员工: ${item.staff || '无'} | 佣金: RM ${item.commission.toFixed(2)}</div>
+                            </div>
+                            <div class="flex items-center gap-2">
+                                <span class="font-bold">RM ${item.price.toFixed(2)}</span>
+                                <button type="button" onclick="openStaffModal(${index})" class="text-indigo-600 text-xs bg-indigo-50 px-2 py-1 rounded font-bold">设置员工</button>
+                                <button type="button" onclick="removeFromCart(${index})" class="text-red-500 font-bold">×</button>
+                            </div>
+                        </div>`;
                 });
                 document.getElementById('total-amount').innerText = 'RM ' + total.toFixed(2);
                 document.getElementById('cart_data_input').value = JSON.stringify(cart);
             }
+
             function fillCustomer(select) {
                 const opt = select.options[select.selectedIndex];
                 if (opt.value) {
@@ -1115,18 +1293,23 @@ def admin_pos():
                 }
             }
         </script>
-    """), services=services, customers=customers)
+    """), services=services, stylists=stylists, customers=customers)
 
 @app.route("/admin/checkout", methods=["POST"])
 @admin_required
 def checkout():
     try:
         cart_data = json.loads(request.form.get("cart_data", "[]"))
+        if not cart_data:
+            return "订单不能为空", 400
         name = request.form.get("customer_name")
         phone = request.form.get("customer_phone_input") or request.form.get("customer_phone")
         pay_method = request.form.get("payment_method")
         total = sum(item["price"] for item in cart_data)
-        order_no = "INV" + datetime.now().strftime("%Y%m%d%H%M%S")
+        
+        # 使用马来西亚实时时间生成单号
+        current_time_str = get_current_time()
+        order_no = "INV" + datetime.now(MY_TZ).strftime("%Y%m%d%H%M%S")
         
         with get_db() as conn:
             cursor = conn.cursor()
@@ -1153,22 +1336,27 @@ def checkout():
                 current_credits -= total
                 cursor.execute("UPDATE customers SET credits = ? WHERE id = ?", (current_credits, cust_id))
                 
-            cursor.execute("INSERT INTO orders (order_no, customer_id, total_amount, payment_details, status, created_at) VALUES (?, ?, ?, ?, 'NORMAL', ?)", (order_no, cust_id, total, pay_method, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+            cursor.execute("INSERT INTO orders (order_no, customer_id, total_amount, payment_details, status, created_at) VALUES (?, ?, ?, ?, 'NORMAL', ?)", (order_no, cust_id, total, pay_method, current_time_str))
             order_id = cursor.lastrowid
             
             for item in cart_data:
-                cursor.execute("INSERT INTO order_items (order_id, item_name, price) VALUES (?, ?, ?)", (order_id, item["name"], item["price"]))
+                cursor.execute("""
+                    INSERT INTO order_items (order_id, item_name, price, staff_name, commission) 
+                    VALUES (?, ?, ?, ?, ?)
+                """, (order_id, item["name"], item["price"], item.get("staff", ""), item.get("commission", 0.0)))
                 
         return f"""
             <div style="max-width:500px;margin:50px auto;padding:20px;border:1px solid #ccc;font-family:sans-serif;border-radius:8px;background:#fff;">
                 <h2 style="color:green;">收银成功凭证</h2>
                 <hr>
                 <p><strong>单号：</strong> {order_no}</p>
+                <p><strong>时间：</strong> {current_time_str}</p>
                 <p><strong>顾客：</strong> {name} ({phone})</p>
                 <p><strong>金额：</strong> RM {total:.2f} ({pay_method})</p>
                 <div style="margin-top:20px;display:flex;gap:10px;">
-                    <a href="/admin/order/whatsapp/{order_id}" target="_blank" style="padding:10px 15px;background:#10b981;color:white;text-decoration:none;border-radius:6px;font-weight:bold;">💬 立即通过 WhatsApp 发送单据</a>
-                    <a href="/admin/pos" style="padding:10px 15px;background:#4f46e5;color:white;text-decoration:none;border-radius:6px;font-weight:bold;">返回 POS 收银台</a>
+                    <a href="/admin/order/invoice/{order_id}" style="padding:10px 15px;background:#4f46e5;color:white;text-decoration:none;border-radius:6px;font-weight:bold;">📥 查看并下载收据</a>
+                    <a href="/admin/order/whatsapp/{order_id}" target="_blank" style="padding:10px 15px;background:#25d366;color:white;text-decoration:none;border-radius:6px;font-weight:bold;">💬 发送 WhatsApp 单据</a>
+                    <a href="/admin/pos" style="padding:10px 15px;background:#6b7280;color:white;text-decoration:none;border-radius:6px;font-weight:bold;">返回 POS</a>
                 </div>
             </div>
         """
@@ -1187,7 +1375,7 @@ BOOKING_CALENDAR_TEMPLATE = """
 <body class="bg-gray-50 min-h-screen p-4 md:p-8">
     <div class="max-w-3xl mx-auto bg-white p-6 md:p-8 rounded-xl shadow-md">
         <h2 class="text-3xl font-extrabold text-center text-indigo-600 mb-2">Dew Hair Salon 在线预约</h2>
-        <p class="text-center text-sm text-gray-500 mb-6">营业时间: {{ open_time }} - {{ close_time }}</p>
+        <p class="text-center text-sm text-gray-500 mb-6">营业时间: {{ open_time }} - {{ close_time }} (马来西亚时间)</p>
         
         {% if error %}
         <div class="mb-4 p-3 bg-red-100 text-red-700 rounded text-sm font-bold">{{ error }}</div>
@@ -1322,10 +1510,12 @@ def public_booking():
                 token = secrets.token_hex(8)
                 cursor.execute("INSERT INTO customers (name, phone, token) VALUES (?, ?, ?)", (c_name, c_phone, token))
                 cust_token = token
+                cust_id = cursor.lastrowid
             else:
                 cust_token = cust["token"]
+                cust_id = cust["id"]
                 
-            cursor.execute("INSERT INTO appointments (customer_id, service_id, stylist, start_time, end_time) VALUES (?, ?, ?, ?, ?)", (cust.id if cust else cursor.lastrowid, service_id, stylist, start_str, end_str))
+            cursor.execute("INSERT INTO appointments (customer_id, service_id, stylist, start_time, end_time) VALUES (?, ?, ?, ?, ?)", (cust_id, service_id, stylist, start_str, end_str))
             
         return f"""
             <div style="max-width:400px;margin:50px auto;text-align:center;font-family:sans-serif;padding:30px;border:1px solid #ddd;border-radius:8px;background:#fff;">
@@ -1334,7 +1524,7 @@ def public_booking():
                 <p><strong>时间：</strong>{start_str} ~ {end_str.split()[1]}</p>
                 <p><strong>发型师：</strong>{stylist}</p>
                 <hr style="margin:20px 0;">
-                <a href="/customer/{cust_token}" style="display:inline-block;padding:12px 20px;background:#4f46e5;color:white;text-decoration:none;border-radius:6px;font-weight:bold;">点此进入我的会员专属页</a>
+                <a href="/customer/{cust_token}" style="display:inline-block;padding:12px 20px;background:#4f46e5;color:white;text-decoration:none;border-radius:6px;font-weight:bold;">点此进入我的会员专属页 & 下载单据</a>
             </div>
         """
     return public_booking_render(error=None)
@@ -1353,10 +1543,10 @@ def public_booking_render(error=None):
         services = conn.execute("SELECT * FROM services WHERE category_type != 'Packages'").fetchall()
         stylists = conn.execute("SELECT * FROM stylists").fetchall()
         
-    today_str = datetime.now().strftime("%Y-%m-%d")
+    today_str = get_current_date()
     selected_date = request.args.get("date", today_str)
     date_strip = []
-    base_dt = datetime.now()
+    base_dt = datetime.now(MY_TZ)
     wd_map = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
     for i in range(14):
         d = base_dt + timedelta(days=i)
@@ -1385,8 +1575,11 @@ def customer_profile(token):
         """, (cust["id"],)).fetchall()
     return render_template_string("""
         <div style="max-width:550px;margin:30px auto;padding:25px;border:1px solid #ccc;font-family:sans-serif;border-radius:8px;background:#fff;">
-            <h2 style="color:#4f46e5;margin-top:0;">Dew Hair Salon - My Member Portal</h2>
-            <p><strong>Name:</strong> {{ cust.name }}</p>
+            <div style="display:flex;justify-content:space-between;align-items:center;">
+                <h2 style="color:#4f46e5;margin:0;">Dew Hair Salon - My Portal</h2>
+                <button onclick="window.print()" style="background:#10b981;color:white;border:none;padding:8px 12px;border-radius:6px;font-weight:bold;cursor:pointer;">📥 下载我的账单/凭证</button>
+            </div>
+            <p style="margin-top:15px;"><strong>Name:</strong> {{ cust.name }}</p>
             <p><strong>Phone:</strong> {{ cust.phone }}</p>
             <div style="background:#f0fdf4;border:1px solid #bbf7d0;padding:12px;border-radius:6px;margin:15px 0;">
                 <span style="font-size:14px;color:#166534;">Current Credit Balance:</span>
@@ -1404,11 +1597,11 @@ def customer_profile(token):
             <p style="color:gray;font-size:14px;">No appointments.</p>
             {% endif %}
             <hr style="border:0;border-top:1px solid #eee;margin:15px 0;">
-            <h3 style="font-size:16px;">Order History</h3>
+            <h3 style="font-size:16px;">Order History & Receipts</h3>
             {% if orders %}
             <ul style="padding-left:20px;font-size:14px;">
                 {% for o in orders %}
-                <li style="margin-bottom:10px; {% if o.status == 'VOID' %}color:#9ca3af;text-decoration:line-through;{% endif %}">
+                <li style="margin-bottom:12px; {% if o.status == 'VOID' %}color:#9ca3af;text-decoration:line-through;{% endif %}">
                     <strong>{{ o.order_no }}</strong> ({{ o.created_at }})<br>
                     Item: {{ o.item_name }} - <strong>RM {{ "%.2f"|format(o.price) }}</strong>
                     {% if o.status == 'VOID' %}<span style="color:red;font-weight:bold;">[VOIDED]</span>{% else %}<span style="color:#4f46e5;">[{{ o.payment_details }}]</span>{% endif %}
