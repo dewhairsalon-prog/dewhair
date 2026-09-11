@@ -5,4 +5,3 @@ itsdangerous==2.1.2
 click==8.1.7
 blinker==1.7.0
 pytz
-from pytz import timezone
