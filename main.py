@@ -235,7 +235,6 @@ def admin_dashboard():
     close_time = get_setting("close_time", "20:00")
     closed_wd = get_setting("closed_weekdays", "1")
     
-    # 统计当月员工销售业绩与佣金
     current_month_prefix = datetime.now(MY_TZ).strftime("%Y-%m")
     with get_db() as conn:
         services = conn.execute("SELECT * FROM services ORDER BY category_type, sub_category").fetchall()
@@ -1230,7 +1229,6 @@ def admin_pos():
             let editingIndex = null;
 
             function addToOrder(name, price) {
-                // 默认给予项目价格 10% 作为默认参考佣金或设为 0
                 cart.push({name, price, staff: '', commission: 0});
                 renderCart();
             }
@@ -1307,7 +1305,6 @@ def checkout():
         pay_method = request.form.get("payment_method")
         total = sum(item["price"] for item in cart_data)
         
-        # 使用马来西亚实时时间生成单号
         current_time_str = get_current_time()
         order_no = "INV" + datetime.now(MY_TZ).strftime("%Y%m%d%H%M%S")
         
