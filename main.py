@@ -60,10 +60,17 @@ def init_db():
                 total_amount REAL NOT NULL,
                 payment_details TEXT NOT NULL,
                 status TEXT DEFAULT 'NORMAL',
+                remark TEXT DEFAULT '',
                 created_at TEXT NOT NULL,
                 FOREIGN KEY(customer_id) REFERENCES customers(id)
             );
         """)
+        # 兼容旧数据库没有 remark 字段的情况
+        try:
+            conn.execute("ALTER TABLE orders ADD COLUMN remark TEXT DEFAULT ''")
+        except sqlite3.OperationalError:
+            pass
+
         conn.execute("""
             CREATE TABLE IF NOT EXISTS order_items (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -917,7 +924,7 @@ def delete_appointment(id):
 def admin_orders():
     with get_db() as conn:
         orders = conn.execute("""
-            SELECT o.*, c.name as customer_name, c.phone as customer_phone 
+            SELECT o.*, c.name as customer_name, c.phone as customer_phone, c.token as customer_token 
             FROM orders o 
             JOIN customers c ON o.customer_id = c.id 
             ORDER BY o.created_at DESC
@@ -927,28 +934,37 @@ def admin_orders():
             <h2 class="text-xl font-bold mb-4">历史订单管理 (作废订单将自动归档保留)</h2>
             <table class="w-full text-left border-collapse">
                 <thead>
-                    <tr class="border-b bg-gray-50">
+                    <tr class="border-b bg-gray-50 text-sm">
                         <th class="p-2">单号</th>
                         <th class="p-2">时间</th>
                         <th class="p-2">顾客姓名</th>
                         <th class="p-2">金额 (RM)</th>
                         <th class="p-2">支付/状态</th>
+                        <th class="p-2">备注 (Remark)</th>
                         <th class="p-2">操作</th>
                     </tr>
                 </thead>
                 <tbody>
                     {% for order in orders %}
                     <tr class="border-b {% if order.status == 'VOID' %}bg-red-50 text-gray-400 line-through{% endif %}">
-                        <td class="p-2 font-bold text-indigo-600">{{ order.order_no }}</td>
+                        <td class="p-2 font-bold text-indigo-600">
+                            <a href="/admin/order/invoice/{{ order.id }}" class="underline hover:text-indigo-800" title="点击查看单据">{{ order.order_no }}</a>
+                        </td>
                         <td class="p-2">{{ order.created_at }}</td>
                         <td class="p-2">{{ order.customer_name }} ({{ order.customer_phone }})</td>
                         <td class="p-2 font-bold">RM {{ "%.2f"|format(order.total_amount) }}</td>
                         <td class="p-2 font-bold">{% if order.status == 'VOID' %}<span class="text-red-600">【已作废】</span>{% else %}{{ order.payment_details }}{% endif %}</td>
                         <td class="p-2">
+                            <form action="/admin/order/remark/{{ order.id }}" method="POST" class="flex gap-1 items-center">
+                                <input type="text" name="remark" value="{{ order.remark or '' }}" placeholder="添加备注..." class="border rounded px-2 py-1 text-xs w-36">
+                                <button class="bg-gray-200 hover:bg-gray-300 text-gray-700 px-2 py-1 rounded text-xs font-bold">保存</button>
+                            </form>
+                        </td>
+                        <td class="p-2 flex gap-2 items-center text-sm">
+                            <a href="/admin/order/invoice/{{ order.id }}" class="text-indigo-600 font-bold hover:underline">查看Invoice</a>
+                            <a href="/admin/order/resend/{{ order.id }}" target="_blank" class="text-green-600 font-bold hover:underline">发送单据</a>
                             {% if order.status != 'VOID' %}
-                            <a href="/admin/order/void/{{ order.id }}" onclick="return confirm('确定要作废此订单吗？若涉及充值或余额扣款将自动回滚。')" class="text-red-500 font-bold text-sm">作废订单</a>
-                            {% else %}
-                            <span class="text-gray-400 text-sm">已归档</span>
+                            <a href="/admin/order/void/{{ order.id }}" onclick="return confirm('确定要作废此订单吗？若涉及充值或余额扣款将自动回滚。')" class="text-red-500 font-bold">作废</a>
                             {% endif %}
                         </td>
                     </tr>
@@ -957,6 +973,105 @@ def admin_orders():
             </table>
         </div>
     """), orders=orders)
+
+@app.route("/admin/order/remark/<int:id>", methods=["POST"])
+@admin_required
+def update_order_remark(id):
+    remark = request.form.get("remark", "")
+    with get_db() as conn:
+        conn.execute("UPDATE orders SET remark = ? WHERE id = ?", (remark, id))
+    return redirect(url_for("admin_orders"))
+
+@app.route("/admin/order/invoice/<int:id>")
+@admin_required
+def admin_order_invoice(id):
+    with get_db() as conn:
+        order = conn.execute("""
+            SELECT o.*, c.name as customer_name, c.phone as customer_phone, c.token as customer_token 
+            FROM orders o JOIN customers c ON o.customer_id = c.id WHERE o.id = ?
+        """, (id,)).fetchone()
+        if not order:
+            return "Order not found", 404
+        items = conn.execute("SELECT * FROM order_items WHERE order_id = ?", (id,)).fetchall()
+        
+    return render_template_string("""
+        <div style="max-width:550px;margin:40px auto;padding:25px;border:1px solid #ccc;font-family:sans-serif;border-radius:8px;background:#fff;box-shadow:0 2px 8px rgba(0,0,0,0.1);">
+            <div style="display:flex;justify-content:between;align-items:center;border-bottom:2px solid #4f46e5;padding-bottom:10px;margin-bottom:15px;">
+                <h2 style="color:#4f46e5;margin:0;">Dew Hair Salon - Invoice</h2>
+                <span style="font-size:14px;font-weight:bold;color:{% if order.status == 'VOID' %}red{% else %}green{% endif %};">{{ order.status }}</span>
+            </div>
+            <p><strong>Order No:</strong> {{ order.order_no }}</p>
+            <p><strong>Date/Time:</strong> {{ order.created_at }}</p>
+            <p><strong>Customer:</strong> {{ order.customer_name }} ({{ order.customer_phone }})</p>
+            <p><strong>Payment Method:</strong> {{ order.payment_details }}</p>
+            {% if order.remark %}
+            <p><strong>Remark:</strong> <span style="color:#d97706;">{{ order.remark }}</span></p>
+            {% endif %}
+            <hr style="border:0;border-top:1px solid #eee;margin:15px 0;">
+            <h3 style="font-size:16px;margin-bottom:8px;">Items Purchased</h3>
+            <table style="width:100%;border-collapse:collapse;font-size:14px;margin-bottom:15px;">
+                <thead>
+                    <tr style="border-bottom:1px solid #ddd;background:#f9fafb;">
+                        <th style="text-align:left;padding:6px;">Item Name</th>
+                        <th style="text-align:right;padding:6px;">Price (RM)</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for item in items %}
+                    <tr style="border-bottom:1px solid #eee;">
+                        <td style="padding:6px;">{{ item.item_name }}</td>
+                        <td style="text-align:right;padding:6px;">RM {{ "%.2f"|format(item.price) }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            <div style="text-align:right;font-size:18px;font-weight:bold;margin-bottom:20px;">
+                Total Amount: <span style="color:#dc2626;">RM {{ "%.2f"|format(order.total_amount) }}</span>
+            </div>
+            <div style="background:#f3f4f6;padding:12px;border-radius:6px;font-size:13px;margin-bottom:20px;">
+                <strong>Customer Profile Link:</strong><br>
+                <a href="/customer/{{ order.customer_token }}" target="_blank" style="color:#4f46e5;word-break:break-all;">/customer/{{ order.customer_token }}</a>
+            </div>
+            <div style="display:flex;gap:10px;">
+                <a href="/admin/order/resend/{{ order.id }}" target="_blank" style="flex:1;text-align:center;padding:10px;background:#10b981;color:white;text-decoration:none;border-radius:6px;font-weight:bold;">Resend Invoice</a>
+                <a href="/admin/orders" style="flex:1;text-align:center;padding:10px;background:#4f46e5;color:white;text-decoration:none;border-radius:6px;font-weight:bold;">Back to Orders</a>
+            </div>
+        </div>
+    """, order=order, items=items)
+
+@app.route("/admin/order/resend/<int:id>")
+@admin_required
+def admin_order_resend(id):
+    with get_db() as conn:
+        order = conn.execute("""
+            SELECT o.*, c.name as customer_name, c.phone as customer_phone, c.token as customer_token 
+            FROM orders o JOIN customers c ON o.customer_id = c.id WHERE o.id = ?
+        """, (id,)).fetchone()
+        if not order:
+            return "Order not found", 404
+        items = conn.execute("SELECT * FROM order_items WHERE order_id = ?", (id,)).fetchall()
+        
+    items_text = ", ".join([f"{item['item_name']} (RM {item['price']:.2f})" for item in items])
+    return render_template_string("""
+        <div style="max-width:500px;margin:50px auto;padding:25px;border:1px solid #ccc;font-family:sans-serif;border-radius:8px;background:#fff;">
+            <h2 style="color:#10b981;margin-top:0;">Resend Invoice to Customer</h2>
+            <p>You can copy the receipt text below and send it to <strong>{{ order.customer_name }}</strong> via WhatsApp:</p>
+            <textarea style="width:100%;height:150px;padding:10px;font-size:13px;border:1px solid #ccc;border-radius:4px;box-sizing:border-box;" readonly>
+[Dew Hair Salon Invoice]
+Order No: {{ order.order_no }}
+Date: {{ order.created_at }}
+Items: {{ items_text }}
+Total: RM {{ "%.2f"|format(order.total_amount) }}
+Payment: {{ order.payment_details }}
+{% if order.remark %}Remark: {{ order.remark }}{% endif %}
+View your profile & history: 
+https://dewhair.onrender.com/customer/{{ order.customer_token }}
+            </textarea>
+            <div style="margin-top:15px;display:flex;gap:10px;">
+                <a href="/admin/orders" style="display:inline-block;padding:10px 20px;background:#4f46e5;color:white;text-decoration:none;border-radius:6px;font-weight:bold;">Back to Order Management</a>
+            </div>
+        </div>
+    """, order=order, items_text=items_text)
 
 @app.route("/admin/order/void/<int:id>")
 @admin_required
@@ -1401,7 +1516,7 @@ def customer_profile(token):
     with get_db() as conn:
         cust = conn.execute("SELECT * FROM customers WHERE token = ?", (token,)).fetchone()
         if not cust:
-            return "无效的会员专属链接", 404
+            return "Invalid customer link.", 404
         orders = conn.execute("""
             SELECT o.*, i.item_name, i.price FROM orders o 
             LEFT JOIN order_items i ON o.id = i.order_id 
@@ -1415,38 +1530,44 @@ def customer_profile(token):
             ORDER BY a.start_time DESC
         """, (cust["id"],)).fetchall()
     return render_template_string("""
-        <div style="max-width:500px;margin:30px auto;padding:20px;border:1px solid #ccc;font-family:sans-serif;border-radius:8px;background:#fff;">
-            <h2 style="color:#4f46e5;margin-top:0;">Dew Hair Salon - 我的会员中心</h2>
-            <p><strong>姓名：</strong> {{ cust.name }}</p>
-            <p><strong>电话：</strong> {{ cust.phone }}</p>
+        <div style="max-width:550px;margin:30px auto;padding:25px;border:1px solid #ccc;font-family:sans-serif;border-radius:8px;background:#fff;">
+            <h2 style="color:#4f46e5;margin-top:0;">Dew Hair Salon - My Member Portal</h2>
+            <p><strong>Name:</strong> {{ cust.name }}</p>
+            <p><strong>Phone:</strong> {{ cust.phone }}</p>
             <div style="background:#f0fdf4;border:1px solid #bbf7d0;padding:12px;border-radius:6px;margin:15px 0;">
-                <span style="font-size:14px;color:#166534;">当前 Credit 余额：</span>
+                <span style="font-size:14px;color:#166534;">Current Credit Balance:</span>
                 <div style="font-size:24px;font-weight:bold;color:#15803d;">RM {{ "%.2f"|format(cust.credits) }}</div>
             </div>
-            <hr>
-            <h3>我的预约记录</h3>
+            <hr style="border:0;border-top:1px solid #eee;margin:15px 0;">
+            <h3 style="font-size:16px;">My Appointments</h3>
             {% if appointments %}
             <ul style="padding-left:20px;font-size:14px;">
                 {% for a in appointments %}
-                <li style="margin-bottom:6px;">{{ a.start_time }} - <strong>{{ a.service_name }}</strong> (发型师: {{ a.stylist }}) - <span style="color:green;">{{ a.status }}</span></li>
+                <li style="margin-bottom:8px;">{{ a.start_time }} - <strong>{{ a.service_name }}</strong> (Stylist: {{ a.stylist }}) - <span style="color:green;font-weight:bold;">{{ a.status }}</span></li>
                 {% endfor %}
             </ul>
             {% else %}
-            <p style="color:gray;font-size:14px;">暂无预约记录。</p>
+            <p style="color:gray;font-size:14px;">No appointment records yet.</p>
             {% endif %}
-            <hr>
-            <h3>历史消费记录</h3>
+            <hr style="border:0;border-top:1px solid #eee;margin:15px 0;">
+            <h3 style="font-size:16px;">Consumption & Order History</h3>
             {% if orders %}
             <ul style="padding-left:20px;font-size:14px;">
                 {% for o in orders %}
-                <li style="margin-bottom:6px; {% if o.status == 'VOID' %}color:#9ca3af;text-decoration:line-through;{% endif %}">
-                    {{ o.created_at }} - <strong>{{ o.item_name }}</strong> (RM {{ "%.2f"|format(o.price) }}) 
-                    {% if o.status == 'VOID' %}<span style="color:red;font-weight:bold;">[已作废]</span>{% else %}[支付: {{ o.payment_details }}]{% endif %}
+                <li style="margin-bottom:10px; {% if o.status == 'VOID' %}color:#9ca3af;text-decoration:line-through;{% endif %}">
+                    <strong>{{ o.order_no }}</strong> ({{ o.created_at }})<br>
+                    Item: {{ o.item_name }} - <strong>RM {{ "%.2f"|format(o.price) }}</strong>
+                    {% if o.status == 'VOID' %}
+                    <span style="color:red;font-weight:bold;">[VOIDED]</span>
+                    {% else %}
+                    <span style="color:#4f46e5;">[Payment: {{ o.payment_details }}]</span>
+                    {% endif %}
+                    {% if o.remark %}<br><span style="color:#d97706;font-size:13px;">Remark: {{ o.remark }}</span>{% endif %}
                 </li>
                 {% endfor %}
             </ul>
             {% else %}
-            <p style="color:gray;font-size:14px;">暂无历史消费记录。</p>
+            <p style="color:gray;font-size:14px;">No purchase history yet.</p>
             {% endif %}
         </div>
     """, cust=cust, orders=orders, appointments=appointments)
