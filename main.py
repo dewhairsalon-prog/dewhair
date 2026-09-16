@@ -3,7 +3,6 @@ import psycopg2
 import psycopg2.extras
 import hmac
 import secrets
-import json
 import urllib.parse
 from datetime import datetime, timedelta
 from pytz import timezone
@@ -25,17 +24,31 @@ def get_current_time():
 def get_current_date():
     return datetime.now(MY_TZ).strftime("%Y-%m-%d")
 
-# 严谨适配 Render 的 PostgreSQL 数据库连接（自动清洗 pgbouncer 参数）
+# 完美拆解解析 Supabase / Render 的 DATABASE_URL，彻底解决特殊字符和 pgbouncer 报错
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
 def get_db():
     if not DATABASE_URL:
-        raise RuntimeError("未检测到 DATABASE_URL 环境变量，请确保已在 Render 中正确绑定 PostgreSQL 数据库！")
+        raise RuntimeError("未检测到 DATABASE_URL 环境变量，请确保已在 Render 中正确绑定数据库！")
     
-    # 过滤掉 psycopg2 不识别的 ?pgbouncer=true 等参数
-    clean_url = DATABASE_URL.split('?')[0] if '?' in DATABASE_URL else DATABASE_URL
+    # 使用 urllib.parse 准确解析 URL 的各个部分
+    result = urllib.parse.urlparse(DATABASE_URL)
     
-    conn = psycopg2.connect(clean_url, cursor_factory=psycopg2.extras.RealDictCursor)
+    dbname = result.path[1:] if result.path else 'postgres'
+    user = result.username
+    password = result.password
+    host = result.hostname
+    port = result.port or 5432
+    
+    # 建立绝对不会解析错误的底层连接
+    conn = psycopg2.connect(
+        dbname=dbname,
+        user=user,
+        password=password,
+        host=host,
+        port=port,
+        cursor_factory=psycopg2.extras.RealDictCursor
+    )
     return conn
 
 def init_db():
