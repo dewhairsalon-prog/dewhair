@@ -25,13 +25,17 @@ def get_current_time():
 def get_current_date():
     return datetime.now(MY_TZ).strftime("%Y-%m-%d")
 
-# 严谨适配 Render 的 PostgreSQL 数据库连接
+# 严谨适配 Render 的 PostgreSQL 数据库连接（自动清洗 pgbouncer 参数）
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
 def get_db():
     if not DATABASE_URL:
         raise RuntimeError("未检测到 DATABASE_URL 环境变量，请确保已在 Render 中正确绑定 PostgreSQL 数据库！")
-    conn = psycopg2.connect(DATABASE_URL, cursor_factory=psycopg2.extras.RealDictCursor)
+    
+    # 过滤掉 psycopg2 不识别的 ?pgbouncer=true 等参数
+    clean_url = DATABASE_URL.split('?')[0] if '?' in DATABASE_URL else DATABASE_URL
+    
+    conn = psycopg2.connect(clean_url, cursor_factory=psycopg2.extras.RealDictCursor)
     return conn
 
 def init_db():
