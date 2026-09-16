@@ -35,47 +35,50 @@ def get_db():
     return conn
 
 def init_db():
-    conn = get_db()
-    cursor = conn.cursor()
-    
-    # 创建管理员表
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS admin (
-            id SERIAL PRIMARY KEY,
-            password TEXT NOT NULL
-        )
-    """)
-    cursor.execute("SELECT COUNT(*) FROM admin")
-    if cursor.fetchone()['count'] == 0:
-        cursor.execute("INSERT INTO admin (password) VALUES (%s)", (ADMIN_PASSWORD,))
-    
-    # 创建服务项目表
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS services (
-            id SERIAL PRIMARY KEY,
-            name TEXT NOT NULL,
-            price REAL NOT NULL,
-            duration INTEGER NOT NULL
-        )
-    """)
-    
-    # 创建预约表 (Appointments)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS appointments (
-            id SERIAL PRIMARY KEY,
-            customer_name TEXT NOT NULL,
-            customer_phone TEXT NOT NULL,
-            service_id INTEGER REFERENCES services(id),
-            appointment_date TEXT NOT NULL,
-            appointment_time TEXT NOT NULL,
-            status TEXT DEFAULT 'pending',
-            created_at TEXT NOT NULL
-        )
-    """)
-    
-    conn.commit()
-    cursor.close()
-    conn.close()
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        
+        # 创建管理员表
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS admin (
+                id SERIAL PRIMARY KEY,
+                password TEXT NOT NULL
+            )
+        """)
+        cursor.execute("SELECT COUNT(*) FROM admin")
+        if cursor.fetchone()['count'] == 0:
+            cursor.execute("INSERT INTO admin (password) VALUES (%s)", (ADMIN_PASSWORD,))
+        
+        # 创建服务项目表
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS services (
+                id SERIAL PRIMARY KEY,
+                name TEXT NOT NULL,
+                price REAL NOT NULL,
+                duration INTEGER NOT NULL
+            )
+        """)
+        
+        # 创建预约表 (Appointments)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS appointments (
+                id SERIAL PRIMARY KEY,
+                customer_name TEXT NOT NULL,
+                customer_phone TEXT NOT NULL,
+                service_id INTEGER,
+                appointment_date TEXT NOT NULL,
+                appointment_time TEXT NOT NULL,
+                status TEXT DEFAULT 'pending',
+                created_at TEXT NOT NULL
+            )
+        """)
+        
+        conn.commit()
+        cursor.close()
+        conn.close()
+    except Exception as e:
+        print(f"数据库初始化出错: {e}")
 
 # 登录验证装饰器
 def login_required(f):
@@ -92,19 +95,22 @@ def admin_login():
     error = None
     if request.method == 'POST':
         pwd = request.form.get('password', '')
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute("SELECT password FROM admin LIMIT 1")
-        row = cursor.fetchone()
-        cursor.close()
-        conn.close()
-        
-        saved_pwd = row['password'] if row else ADMIN_PASSWORD
-        if hmac.compare_digest(pwd, saved_pwd):
-            session['logged_in'] = True
-            return redirect(url_for('admin_dashboard'))
-        else:
-            error = "密码错误，请重试"
+        try:
+            conn = get_db()
+            cursor = conn.cursor()
+            cursor.execute("SELECT password FROM admin LIMIT 1")
+            row = cursor.fetchone()
+            cursor.close()
+            conn.close()
+            
+            saved_pwd = row['password'] if row else ADMIN_PASSWORD
+            if hmac.compare_digest(pwd, saved_pwd):
+                session['logged_in'] = True
+                return redirect(url_for('admin_dashboard'))
+            else:
+                error = "密码错误，请重试"
+        except Exception as e:
+            error = f"登录数据库错误: {e}"
             
     return render_template_string("""
 <!doctype html>
@@ -120,7 +126,7 @@ def admin_login():
         input[type="password"] { width: 100%; padding: 10px; margin-bottom: 15px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; }
         button { width: 100%; padding: 10px; background: #007bff; border: none; color: white; font-size: 16px; border-radius: 4px; cursor: pointer; }
         button:hover { background: #0056b3; }
-        .error { color: red; font-size: 14px; text-align: center; margin-bottom: 10px; }
+        .error { color: red; font-size: 14px; text-align: center; margin-bottom: 10px; word-break: break-all; }
     </style>
 </head>
 <body>
@@ -146,20 +152,23 @@ def admin_logout():
 @app.route('/admin')
 @login_required
 def admin_dashboard():
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM services ORDER BY id DESC")
-    services = cursor.fetchall()
-    
-    cursor.execute("""
-        SELECT a.*, s.name as service_name 
-        FROM appointments a 
-        LEFT JOIN services s ON a.service_id = s.id 
-        ORDER BY a.id DESC
-    """)
-    appointments = cursor.fetchall()
-    cursor.close()
-    conn.close()
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM services ORDER BY id DESC")
+        services = cursor.fetchall()
+        
+        cursor.execute("""
+            SELECT a.*, s.name as service_name 
+            FROM appointments a 
+            LEFT JOIN services s ON a.service_id = s.id 
+            ORDER BY a.id DESC
+        """)
+        appointments = cursor.fetchall()
+        cursor.close()
+        conn.close()
+    except Exception as e:
+        return f"仪表盘加载数据库出错: {e}，请检查数据表结构。"
     
     return render_template_string("""
 <!doctype html>
@@ -244,33 +253,42 @@ def admin_dashboard():
 </html>
 """, services=services, appointments=appointments)
 
-# POS 页面（已完美恢复，不再 404）
+# POS 页面
 @app.route('/admin/pos', methods=['GET', 'POST'])
 @login_required
 def admin_pos():
-    conn = get_db()
-    cursor = conn.cursor()
     success_msg = None
-    
     if request.method == 'POST':
-        customer_name = request.form.get('customer_name', '散客')
-        customer_phone = request.form.get('customer_phone', '-')
-        service_id = request.form.get('service_id')
-        appointment_date = get_current_date()
-        appointment_time = datetime.now(MY_TZ).strftime("%H:%M")
-        created_at = get_current_time()
-        
-        cursor.execute("""
-            INSERT INTO appointments (customer_name, customer_phone, service_id, appointment_date, appointment_time, status, created_at)
-            VALUES (%s, %s, %s, %s, %s, '已完成(POS)', %s)
-        """, (customer_name, customer_phone, service_id, appointment_date, appointment_time, created_at))
-        conn.commit()
-        success_msg = "POS 收银记账成功！"
+        try:
+            customer_name = request.form.get('customer_name', '散客')
+            customer_phone = request.form.get('customer_phone', '-')
+            service_id = request.form.get('service_id')
+            appointment_date = get_current_date()
+            appointment_time = datetime.now(MY_TZ).strftime("%H:%M")
+            created_at = get_current_time()
+            
+            conn = get_db()
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO appointments (customer_name, customer_phone, service_id, appointment_date, appointment_time, status, created_at)
+                VALUES (%s, %s, %s, %s, %s, '已完成(POS)', %s)
+            """, (customer_name, customer_phone, service_id, appointment_date, appointment_time, created_at))
+            conn.commit()
+            cursor.close()
+            conn.close()
+            success_msg = "POS 收银记账成功！"
+        except Exception as e:
+            success_msg = f"POS记账失败: {e}"
 
-    cursor.execute("SELECT * FROM services ORDER BY id DESC")
-    services = cursor.fetchall()
-    cursor.close()
-    conn.close()
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM services ORDER BY id DESC")
+        services = cursor.fetchall()
+        cursor.close()
+        conn.close()
+    except Exception as e:
+        services = []
     
     return render_template_string("""
 <!doctype html>
@@ -285,7 +303,7 @@ def admin_pos():
         input, select { width: 100%; padding: 10px; margin: 10px 0 20px 0; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; }
         button { background: #28a745; color: white; border: none; padding: 12px; width: 100%; border-radius: 4px; cursor: pointer; font-size: 16px; font-weight: bold; }
         button:hover { background: #218838; }
-        .success { background: #d4edda; color: #155724; padding: 10px; border-radius: 4px; text-align: center; margin-bottom: 15px; }
+        .success { background: #d4edda; color: #155724; padding: 10px; border-radius: 4px; text-align: center; margin-bottom: 15px; word-break: break-all; }
         a { color: #007bff; text-decoration: none; }
     </style>
 </head>
@@ -449,29 +467,38 @@ def admin_delete_appointment(appt_id):
 # 顾客前台首页预约
 @app.route('/', methods=['GET', 'POST'])
 def index():
-    conn = get_db()
-    cursor = conn.cursor()
     success_msg = None
-    
     if request.method == 'POST':
-        customer_name = request.form.get('customer_name')
-        customer_phone = request.form.get('customer_phone')
-        service_id = request.form.get('service_id')
-        appointment_date = request.form.get('appointment_date')
-        appointment_time = request.form.get('appointment_time')
-        created_at = get_current_time()
-        
-        cursor.execute("""
-            INSERT INTO appointments (customer_name, customer_phone, service_id, appointment_date, appointment_time, created_at)
-            VALUES (%s, %s, %s, %s, %s, %s)
-        """, (customer_name, customer_phone, service_id, appointment_date, appointment_time, created_at))
-        conn.commit()
-        success_msg = "预约提交成功！我们会尽快与您联系。"
+        try:
+            customer_name = request.form.get('customer_name')
+            customer_phone = request.form.get('customer_phone')
+            service_id = request.form.get('service_id')
+            appointment_date = request.form.get('appointment_date')
+            appointment_time = request.form.get('appointment_time')
+            created_at = get_current_time()
+            
+            conn = get_db()
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO appointments (customer_name, customer_phone, service_id, appointment_date, appointment_time, created_at)
+                VALUES (%s, %s, %s, %s, %s, %s)
+            """, (customer_name, customer_phone, service_id, appointment_date, appointment_time, created_at))
+            conn.commit()
+            cursor.close()
+            conn.close()
+            success_msg = "预约提交成功！我们会尽快与您联系。"
+        except Exception as e:
+            success_msg = f"提交预约出错: {e}"
 
-    cursor.execute("SELECT * FROM services ORDER BY id DESC")
-    services = cursor.fetchall()
-    cursor.close()
-    conn.close()
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM services ORDER BY id DESC")
+        services = cursor.fetchall()
+        cursor.close()
+        conn.close()
+    except Exception as e:
+        services = []
     
     return render_template_string("""
 <!doctype html>
@@ -488,7 +515,7 @@ def index():
         input, select { width: 100%; padding: 10px; margin-top: 5px; border: 1px solid #ddd; border-radius: 5px; box-sizing: border-box; }
         button { background: #e67e22; color: white; border: none; padding: 12px; width: 100%; border-radius: 5px; cursor: pointer; font-size: 16px; margin-top: 25px; font-weight: bold; }
         button:hover { background: #d35400; }
-        .success { background: #d4edda; color: #155724; padding: 12px; border-radius: 5px; text-align: center; margin-bottom: 20px; border: 1px solid #c3e6cb; }
+        .success { background: #d4edda; color: #155724; padding: 12px; border-radius: 5px; text-align: center; margin-bottom: 20px; border: 1px solid #c3e6cb; word-break: break-all; }
         .admin-link { text-align: center; margin-top: 20px; font-size: 13px; }
         .admin-link a { color: #7f8c8d; text-decoration: none; }
     </style>
