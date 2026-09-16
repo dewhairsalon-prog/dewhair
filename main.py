@@ -24,23 +24,20 @@ def get_current_time():
 def get_current_date():
     return datetime.now(MY_TZ).strftime("%Y-%m-%d")
 
-# 完美拆解解析 Supabase / Render 的 DATABASE_URL，彻底解决特殊字符和 pgbouncer 报错
+# 完美拆解解析 DATABASE_URL
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
 def get_db():
     if not DATABASE_URL:
         raise RuntimeError("未检测到 DATABASE_URL 环境变量，请确保已在 Render 中正确绑定数据库！")
     
-    # 使用 urllib.parse 准确解析 URL 的各个部分
     result = urllib.parse.urlparse(DATABASE_URL)
-    
     dbname = result.path[1:] if result.path else 'postgres'
     user = result.username
     password = result.password
     host = result.hostname
     port = result.port or 5432
     
-    # 建立绝对不会解析错误的底层连接
     conn = psycopg2.connect(
         dbname=dbname,
         user=user,
@@ -51,12 +48,13 @@ def get_db():
     )
     return conn
 
-def init_db():
+# 核心防错：每次连接数据库时自动确保所有必需的数据表万无一失地存在
+def ensure_tables_exist():
     try:
         conn = get_db()
         cursor = conn.cursor()
         
-        # 创建管理员表
+        # 1. 管理员表
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS admin (
                 id SERIAL PRIMARY KEY,
@@ -67,7 +65,7 @@ def init_db():
         if cursor.fetchone()['count'] == 0:
             cursor.execute("INSERT INTO admin (password) VALUES (%s)", (ADMIN_PASSWORD,))
         
-        # 创建服务项目表
+        # 2. 服务项目表
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS services (
                 id SERIAL PRIMARY KEY,
@@ -77,7 +75,7 @@ def init_db():
             )
         """)
         
-        # 创建预约表 (Appointments)
+        # 3. 预约/收银表
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS appointments (
                 id SERIAL PRIMARY KEY,
@@ -95,7 +93,7 @@ def init_db():
         cursor.close()
         conn.close()
     except Exception as e:
-        print(f"数据库初始化出错: {e}")
+        print(f"自动建表出错: {e}")
 
 # 登录验证装饰器
 def login_required(f):
@@ -109,6 +107,7 @@ def login_required(f):
 # 管理员登录路由
 @app.route('/admin/login', methods=['GET', 'POST'])
 def admin_login():
+    ensure_tables_exist()  # 每次进登录页前雷打不动检查一次表
     error = None
     if request.method == 'POST':
         pwd = request.form.get('password', '')
@@ -169,6 +168,7 @@ def admin_logout():
 @app.route('/admin')
 @login_required
 def admin_dashboard():
+    ensure_tables_exist()
     try:
         conn = get_db()
         cursor = conn.cursor()
@@ -185,7 +185,7 @@ def admin_dashboard():
         cursor.close()
         conn.close()
     except Exception as e:
-        return f"仪表盘加载数据库出错: {e}，请检查数据表结构。"
+        return f"仪表盘加载数据库出错: {e}"
     
     return render_template_string("""
 <!doctype html>
@@ -274,6 +274,7 @@ def admin_dashboard():
 @app.route('/admin/pos', methods=['GET', 'POST'])
 @login_required
 def admin_pos():
+    ensure_tables_exist()
     success_msg = None
     if request.method == 'POST':
         try:
@@ -353,6 +354,7 @@ def admin_pos():
 @app.route('/admin/services/add', methods=['GET', 'POST'])
 @login_required
 def admin_add_service():
+    ensure_tables_exist()
     if request.method == 'POST':
         name = request.form.get('name')
         price = request.form.get('price')
@@ -403,6 +405,7 @@ def admin_add_service():
 @app.route('/admin/services/edit/<int:service_id>', methods=['GET', 'POST'])
 @login_required
 def admin_edit_service(service_id):
+    ensure_tables_exist()
     conn = get_db()
     cursor = conn.cursor()
     
@@ -462,6 +465,7 @@ def admin_edit_service(service_id):
 @app.route('/admin/services/delete/<int:service_id>')
 @login_required
 def admin_delete_service(service_id):
+    ensure_tables_exist()
     conn = get_db()
     cursor = conn.cursor()
     cursor.execute("DELETE FROM services WHERE id = %s", (service_id,))
@@ -473,6 +477,7 @@ def admin_delete_service(service_id):
 @app.route('/admin/appointments/delete/<int:appt_id>')
 @login_required
 def admin_delete_appointment(appt_id):
+    ensure_tables_exist()
     conn = get_db()
     cursor = conn.cursor()
     cursor.execute("DELETE FROM appointments WHERE id = %s", (appt_id,))
@@ -484,6 +489,7 @@ def admin_delete_appointment(appt_id):
 # 顾客前台首页预约
 @app.route('/', methods=['GET', 'POST'])
 def index():
+    ensure_tables_exist()
     success_msg = None
     if request.method == 'POST':
         try:
@@ -573,15 +579,6 @@ def index():
 </body>
 </html>
 """, services=services, success_msg=success_msg)
-
-@app.before_request
-def before_first_request():
-    if not getattr(app, '_got_first_request', False):
-        try:
-            init_db()
-        except Exception as e:
-            print(f"数据库初始化提示: {e}")
-        app._got_first_request = True
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
