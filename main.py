@@ -85,7 +85,8 @@ def login_required(f):
             return redirect(url_for('admin_login'))
         return f(*args, **kwargs)
     return decorated_function
-    # 管理员登录路由
+
+# 管理员登录路由
 @app.route('/admin/login', methods=['GET', 'POST'])
 def admin_login():
     error = None
@@ -458,7 +459,15 @@ def index():
 </html>
 """, services=services, success_msg=success_msg)
 
+@app.before_request
+def before_first_request():
+    if not getattr(app, '_got_first_request', False):
+        try:
+            init_db()
+        except Exception as e:
+            print(f"数据库初始化提示: {e}")
+        app._got_first_request = True
+
 if __name__ == '__main__':
-    init_db()
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port)
