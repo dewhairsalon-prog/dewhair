@@ -185,7 +185,7 @@ def admin_dashboard():
 <body>
     <div class="container">
         <h2>管理员仪表盘</h2>
-        <p>欢迎回来！ | <a href="{{ url_for('admin_logout') }}">退出登录</a> | <a href="{{ url_for('index') }}" target="_blank">查看前台首页</a></p>
+        <p>欢迎回来！ | <a href="{{ url_for('admin_logout') }}">退出登录</a> | <a href="{{ url_for('index') }}" target="_blank">查看前台首页</a> | <a href="{{ url_for('admin_pos') }}">POS收银</a></p>
         <hr style="border: 0; border-top: 1px solid #eee; margin: 20px 0;">
         
         <h3>服务项目管理</h3>
@@ -243,6 +243,77 @@ def admin_dashboard():
 </body>
 </html>
 """, services=services, appointments=appointments)
+
+# POS 页面（已完美恢复，不再 404）
+@app.route('/admin/pos', methods=['GET', 'POST'])
+@login_required
+def admin_pos():
+    conn = get_db()
+    cursor = conn.cursor()
+    success_msg = None
+    
+    if request.method == 'POST':
+        customer_name = request.form.get('customer_name', '散客')
+        customer_phone = request.form.get('customer_phone', '-')
+        service_id = request.form.get('service_id')
+        appointment_date = get_current_date()
+        appointment_time = datetime.now(MY_TZ).strftime("%H:%M")
+        created_at = get_current_time()
+        
+        cursor.execute("""
+            INSERT INTO appointments (customer_name, customer_phone, service_id, appointment_date, appointment_time, status, created_at)
+            VALUES (%s, %s, %s, %s, %s, '已完成(POS)', %s)
+        """, (customer_name, customer_phone, service_id, appointment_date, appointment_time, created_at))
+        conn.commit()
+        success_msg = "POS 收银记账成功！"
+
+    cursor.execute("SELECT * FROM services ORDER BY id DESC")
+    services = cursor.fetchall()
+    cursor.close()
+    conn.close()
+    
+    return render_template_string("""
+<!doctype html>
+<html lang="zh">
+<head>
+    <meta charset="utf-8">
+    <title>POS 收银台</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        body { font-family: Arial, sans-serif; background: #f8f9fa; padding: 20px; }
+        .form-card { max-width: 450px; margin: auto; background: white; padding: 25px; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
+        input, select { width: 100%; padding: 10px; margin: 10px 0 20px 0; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; }
+        button { background: #28a745; color: white; border: none; padding: 12px; width: 100%; border-radius: 4px; cursor: pointer; font-size: 16px; font-weight: bold; }
+        button:hover { background: #218838; }
+        .success { background: #d4edda; color: #155724; padding: 10px; border-radius: 4px; text-align: center; margin-bottom: 15px; }
+        a { color: #007bff; text-decoration: none; }
+    </style>
+</head>
+<body>
+    <div class="form-card">
+        <h2>⚡ 现场 POS 收银</h2>
+        {% if success_msg %}
+        <div class="success">{{ success_msg }}</div>
+        {% endif %}
+        <form method="POST">
+            <label>顾客姓名：</label>
+            <input type="text" name="customer_name" value="散客" required>
+            <label>联系电话：</label>
+            <input type="text" name="customer_phone" value="-">
+            <label>选择服务项目：</label>
+            <select name="service_id" required>
+                <option value="">-- 请选择服务 --</option>
+                {% for s in services %}
+                <option value="{{ s.id }}">{{ s.name }} (RM {{ s.price }} / {{ s.duration }}分钟)</option>
+                {% endfor %}
+            </select>
+            <button type="submit">完成结账并记录</button>
+        </form>
+        <p style="text-align: center; margin-top: 15px;"><a href="{{ url_for('admin_dashboard') }}">返回仪表盘</a></p>
+    </div>
+</body>
+</html>
+""", services=services, success_msg=success_msg)
 
 @app.route('/admin/services/add', methods=['GET', 'POST'])
 @login_required
