@@ -26,145 +26,127 @@ def get_current_date():
     return datetime.now(MY_TZ).strftime("%Y-%m-%d")
 
 # ==========================================
-# 彻底修复 Render 平台数据丢失问题：优先使用挂载的永久磁盘目录
+# PostgreSQL 数据库连接配置 (Render 生产环境与本地通用)
 # ==========================================
-if os.path.exists("/opt/render/project/src"):
-    DB_DIR = "/opt/render/project/src"
-elif os.path.exists("/data"):
-    DB_DIR = "/data"
-else:
-    DB_DIR = "."
-
-import sqlite3
-DB_NAME = os.path.join(DB_DIR, "salon.db")
+DATABASE_URL = os.environ.get("DATABASE_URL")
 
 def get_db():
-    conn = sqlite3.connect(DB_NAME)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON;")
+    if DATABASE_URL:
+        conn = psycopg2.connect(DATABASE_URL, cursor_factory=psycopg2.extras.RealDictCursor)
+    else:
+        # 如果没有配置 DATABASE_URL，默认回退到本地的测试连接串（可根据需要修改）
+        conn = psycopg2.connect("dbname=salon user=postgres password=postgres", cursor_factory=psycopg2.extras.RealDictCursor)
     return conn
 
 def init_db():
     with get_db() as conn:
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS services (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL,
-                category_type TEXT NOT NULL,
-                sub_category TEXT NOT NULL,
-                price REAL NOT NULL,
-                duration INTEGER DEFAULT 30,
-                credit_value REAL DEFAULT 0.0
-            );
-        """)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS stylists (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL,
-                title TEXT NOT NULL
-            );
-        """)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS customers (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL,
-                phone TEXT UNIQUE NOT NULL,
-                token TEXT UNIQUE NOT NULL,
-                credits REAL DEFAULT 0.0
-            );
-        """)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS orders (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                order_no TEXT UNIQUE NOT NULL,
-                customer_id INTEGER NOT NULL,
-                total_amount REAL NOT NULL,
-                payment_details TEXT NOT NULL,
-                status TEXT DEFAULT 'NORMAL',
-                remark TEXT DEFAULT '',
-                created_at TEXT NOT NULL,
-                FOREIGN KEY(customer_id) REFERENCES customers(id)
-            );
-        """)
-        try:
-            conn.execute("ALTER TABLE orders ADD COLUMN remark TEXT DEFAULT ''")
-        except sqlite3.OperationalError:
-            pass
+        with conn.cursor() as cursor:
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS services (
+                    id SERIAL PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    category_type TEXT NOT NULL,
+                    sub_category TEXT NOT NULL,
+                    price DOUBLE PRECISION NOT NULL,
+                    duration INTEGER DEFAULT 30,
+                    credit_value DOUBLE PRECISION DEFAULT 0.0
+                );
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS stylists (
+                    id SERIAL PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    title TEXT NOT NULL
+                );
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS customers (
+                    id SERIAL PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    phone TEXT UNIQUE NOT NULL,
+                    token TEXT UNIQUE NOT NULL,
+                    credits DOUBLE PRECISION DEFAULT 0.0
+                );
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS orders (
+                    id SERIAL PRIMARY KEY,
+                    order_no TEXT UNIQUE NOT NULL,
+                    customer_id INTEGER NOT NULL,
+                    total_amount DOUBLE PRECISION NOT NULL,
+                    payment_details TEXT NOT NULL,
+                    status TEXT DEFAULT 'NORMAL',
+                    remark TEXT DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(customer_id) REFERENCES customers(id)
+                );
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS order_items (
+                    id SERIAL PRIMARY KEY,
+                    order_id INTEGER NOT NULL,
+                    item_name TEXT NOT NULL,
+                    price DOUBLE PRECISION NOT NULL,
+                    qty INTEGER DEFAULT 1,
+                    staff_name TEXT DEFAULT '',
+                    commission DOUBLE PRECISION DEFAULT 0.0,
+                    FOREIGN KEY(order_id) REFERENCES orders(id) ON DELETE CASCADE
+                );
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS appointments (
+                    id SERIAL PRIMARY KEY,
+                    customer_id INTEGER NOT NULL,
+                    service_id INTEGER NOT NULL,
+                    stylist TEXT NOT NULL,
+                    start_time TEXT NOT NULL,
+                    end_time TEXT NOT NULL,
+                    status TEXT DEFAULT 'CONFIRMED',
+                    FOREIGN KEY(customer_id) REFERENCES customers(id),
+                    FOREIGN KEY(service_id) REFERENCES services(id)
+                );
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS settings (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                );
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS holidays (
+                    id SERIAL PRIMARY KEY,
+                    date_str TEXT UNIQUE NOT NULL,
+                    reason TEXT
+                );
+            """)
+            
+            cursor.execute("INSERT INTO settings (key, value) VALUES ('open_time', '10:00') ON CONFLICT (key) DO NOTHING")
+            cursor.execute("INSERT INTO settings (key, value) VALUES ('close_time', '20:00') ON CONFLICT (key) DO NOTHING")
+            cursor.execute("INSERT INTO settings (key, value) VALUES ('closed_weekdays', '1') ON CONFLICT (key) DO NOTHING")
+            
+            cursor.execute("SELECT COUNT(*) FROM services")
+            if cursor.fetchone()["count"] == 0:
+                sample_services = [
+                    ("高级总监剪发", "Services", "剪发", 120.0, 45, 0.0),
+                    ("植物精油染发", "Services", "染发", 380.0, 90, 0.0),
+                    ("充值 1000 送 200", "Packages", "储值套餐", 1000.0, 0, 1200.0),
+                ]
+                for s in sample_services:
+                    cursor.execute("""
+                        INSERT INTO services (name, category_type, sub_category, price, duration, credit_value)
+                        VALUES (%s, %s, %s, %s, %s, %s)
+                    """, s)
 
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS order_items (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                order_id INTEGER NOT NULL,
-                item_name TEXT NOT NULL,
-                price REAL NOT NULL,
-                qty INTEGER DEFAULT 1,
-                staff_name TEXT DEFAULT '',
-                commission REAL DEFAULT 0.0,
-                FOREIGN KEY(order_id) REFERENCES orders(id) ON DELETE CASCADE
-            );
-        """)
-        
-        try:
-            conn.execute("ALTER TABLE order_items ADD COLUMN staff_name TEXT DEFAULT ''")
-        except sqlite3.OperationalError:
-            pass
-        try:
-            conn.execute("ALTER TABLE order_items ADD COLUMN commission REAL DEFAULT 0.0")
-        except sqlite3.OperationalError:
-            pass
-
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS appointments (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                customer_id INTEGER NOT NULL,
-                service_id INTEGER NOT NULL,
-                stylist TEXT NOT NULL,
-                start_time TEXT NOT NULL,
-                end_time TEXT NOT NULL,
-                status TEXT DEFAULT 'CONFIRMED',
-                FOREIGN KEY(customer_id) REFERENCES customers(id),
-                FOREIGN KEY(service_id) REFERENCES services(id)
-            );
-        """)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS settings (
-                key TEXT PRIMARY KEY,
-                value TEXT NOT NULL
-            );
-        """)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS holidays (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                date_str TEXT UNIQUE NOT NULL,
-                reason TEXT
-            );
-        """)
-        
-        conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('open_time', '10:00')")
-        conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('close_time', '20:00')")
-        conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('closed_weekdays', '1')")
-        
-        cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) FROM services")
-        if cursor.fetchone()[0] == 0:
-            sample_services = [
-                ("高级总监剪发", "Services", "剪发", 120.0, 45, 0.0),
-                ("植物精油染发", "Services", "染发", 380.0, 90, 0.0),
-                ("充值 1000 送 200", "Packages", "储值套餐", 1000.0, 0, 1200.0),
-            ]
-            cursor.executemany("""
-                INSERT INTO services (name, category_type, sub_category, price, duration, credit_value)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """, sample_services)
-
-        cursor.execute("SELECT COUNT(*) FROM stylists")
-        if cursor.fetchone()[0] == 0:
-            sample_stylists = [
-                ("Alex", "总监"),
-                ("David", "资深设计师"),
-                ("Emma", "高级造型师")
-            ]
-            cursor.executemany("INSERT INTO stylists (name, title) VALUES (?, ?)", sample_stylists)
+            cursor.execute("SELECT COUNT(*) FROM stylists")
+            if cursor.fetchone()["count"] == 0:
+                sample_stylists = [
+                    ("Alex", "总监"),
+                    ("David", "资深设计师"),
+                    ("Emma", "高级造型师")
+                ]
+                for st in sample_stylists:
+                    cursor.execute("INSERT INTO stylists (name, title) VALUES (%s, %s)", st)
+        conn.commit()
 
 init_db()
 
@@ -178,8 +160,10 @@ def admin_required(f):
 
 def get_setting(key, default):
     with get_db() as conn:
-        row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
-        return row["value"] if row else default
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT value FROM settings WHERE key = %s", (key,))
+            row = cursor.fetchone()
+            return row["value"] if row else default
 
 LAYOUT_TEMPLATE = """
 <!DOCTYPE html>
@@ -246,20 +230,25 @@ def admin_dashboard():
     
     current_month_prefix = datetime.now(MY_TZ).strftime("%Y-%m")
     with get_db() as conn:
-        services = conn.execute("SELECT * FROM services ORDER BY category_type, sub_category").fetchall()
-        stylists = conn.execute("SELECT * FROM stylists ORDER BY id DESC").fetchall()
-        holidays = conn.execute("SELECT * FROM holidays ORDER BY date_str DESC").fetchall()
-        
-        staff_performance = conn.execute("""
-            SELECT i.staff_name, 
-                   COUNT(i.id) as item_count,
-                   SUM(i.price) as total_sales,
-                   SUM(i.commission) as total_commission
-            FROM order_items i
-            JOIN orders o ON i.order_id = o.id
-            WHERE o.status = 'NORMAL' AND o.created_at LIKE ? AND i.staff_name != '' AND i.staff_name IS NOT NULL
-            GROUP BY i.staff_name
-        """, (f"{current_month_prefix}%",)).fetchall()
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT * FROM services ORDER BY category_type, sub_category")
+            services = cursor.fetchall()
+            cursor.execute("SELECT * FROM stylists ORDER BY id DESC")
+            stylists = cursor.fetchall()
+            cursor.execute("SELECT * FROM holidays ORDER BY date_str DESC")
+            holidays = cursor.fetchall()
+            
+            cursor.execute("""
+                SELECT i.staff_name, 
+                       COUNT(i.id) as item_count,
+                       SUM(i.price) as total_sales,
+                       SUM(i.commission) as total_commission
+                FROM order_items i
+                JOIN orders o ON i.order_id = o.id
+                WHERE o.status = 'NORMAL' AND o.created_at LIKE %s AND i.staff_name != '' AND i.staff_name IS NOT NULL
+                GROUP BY i.staff_name
+            """, (f"{current_month_prefix}%",))
+            staff_performance = cursor.fetchall()
         
     return render_template_string(LAYOUT_TEMPLATE.replace("{% block content %}{% endblock %}", """
         <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
@@ -446,17 +435,21 @@ def add_stylist():
     name = request.form.get("name")
     title = request.form.get("title")
     with get_db() as conn:
-        try:
-            conn.execute("INSERT INTO stylists (name, title) VALUES (?, ?)", (name, title))
-        except:
-            pass
+        with conn.cursor() as cursor:
+            try:
+                cursor.execute("INSERT INTO stylists (name, title) VALUES (%s, %s)", (name, title))
+                conn.commit()
+            except:
+                conn.rollback()
     return redirect(url_for("admin_dashboard"))
 
 @app.route("/admin/stylist/delete/<int:id>")
 @admin_required
 def delete_stylist(id):
     with get_db() as conn:
-        conn.execute("DELETE FROM stylists WHERE id = ?", (id,))
+        with conn.cursor() as cursor:
+            cursor.execute("DELETE FROM stylists WHERE id = %s", (id,))
+            conn.commit()
     return redirect(url_for("admin_dashboard"))
 
 @app.route("/admin/settings/update", methods=["POST"])
@@ -466,9 +459,11 @@ def update_settings():
     close_time = request.form.get("close_time", "20:00")
     closed_weekdays = request.form.get("closed_weekdays", "1")
     with get_db() as conn:
-        conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('open_time', ?)", (open_time,))
-        conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('close_time', ?)", (close_time,))
-        conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('closed_weekdays', ?)", (closed_weekdays,))
+        with conn.cursor() as cursor:
+            cursor.execute("INSERT INTO settings (key, value) VALUES ('open_time', %s) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", (open_time,))
+            cursor.execute("INSERT INTO settings (key, value) VALUES ('close_time', %s) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", (close_time,))
+            cursor.execute("INSERT INTO settings (key, value) VALUES ('closed_weekdays', %s) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", (closed_weekdays,))
+            conn.commit()
     return redirect(url_for("admin_dashboard"))
 
 @app.route("/admin/holiday/add", methods=["POST"])
@@ -477,17 +472,21 @@ def add_holiday():
     date_str = request.form.get("date_str")
     reason = request.form.get("reason", "闭店休息")
     with get_db() as conn:
-        try:
-            conn.execute("INSERT INTO holidays (date_str, reason) VALUES (?, ?)", (date_str, reason))
-        except:
-            pass
+        with conn.cursor() as cursor:
+            try:
+                cursor.execute("INSERT INTO holidays (date_str, reason) VALUES (%s, %s)", (date_str, reason))
+                conn.commit()
+            except:
+                conn.rollback()
     return redirect(url_for("admin_dashboard"))
 
 @app.route("/admin/holiday/delete/<int:id>")
 @admin_required
 def delete_holiday(id):
     with get_db() as conn:
-        conn.execute("DELETE FROM holidays WHERE id = ?", (id,))
+        with conn.cursor() as cursor:
+            cursor.execute("DELETE FROM holidays WHERE id = %s", (id,))
+            conn.commit()
     return redirect(url_for("admin_dashboard"))
 
 @app.route("/admin/service/add", methods=["POST"])
@@ -499,17 +498,21 @@ def add_service():
     duration = int(request.form.get("duration", 30))
     credit_value = float(request.form.get("credit_value", 0)) if cat == 'Packages' else 0.0
     with get_db() as conn:
-        conn.execute("""
-            INSERT INTO services (name, category_type, sub_category, price, duration, credit_value) 
-            VALUES (?, ?, ?, ?, ?, ?)
-        """, (name, cat, cat, price, duration, credit_value))
+        with conn.cursor() as cursor:
+            cursor.execute("""
+                INSERT INTO services (name, category_type, sub_category, price, duration, credit_value) 
+                VALUES (%s, %s, %s, %s, %s, %s)
+            """, (name, cat, cat, price, duration, credit_value))
+            conn.commit()
     return redirect(url_for("admin_dashboard"))
 
 @app.route("/admin/service/delete/<int:id>")
 @admin_required
 def delete_service(id):
     with get_db() as conn:
-        conn.execute("DELETE FROM services WHERE id = ?", (id,))
+        with conn.cursor() as cursor:
+            cursor.execute("DELETE FROM services WHERE id = %s", (id,))
+            conn.commit()
     return redirect(url_for("admin_dashboard"))
 
 @app.route("/admin/customers")
@@ -517,23 +520,25 @@ def delete_service(id):
 def admin_customers():
     search_query = request.args.get("q", "").strip()
     with get_db() as conn:
-        if search_query:
-            customers = conn.execute("""
-                SELECT c.*, 
-                       (SELECT COUNT(*) FROM appointments WHERE customer_id = c.id) as app_count,
-                       (SELECT COUNT(*) FROM orders WHERE customer_id = c.id AND status = 'NORMAL') as order_count
-                FROM customers c 
-                WHERE c.name LIKE ? OR c.phone LIKE ?
-                ORDER BY c.id DESC
-            """, (f"%{search_query}%", f"%{search_query}%")).fetchall()
-        else:
-            customers = conn.execute("""
-                SELECT c.*, 
-                       (SELECT COUNT(*) FROM appointments WHERE customer_id = c.id) as app_count,
-                       (SELECT COUNT(*) FROM orders WHERE customer_id = c.id AND status = 'NORMAL') as order_count
-                FROM customers c 
-                ORDER BY c.id DESC
-            """).fetchall()
+        with conn.cursor() as cursor:
+            if search_query:
+                cursor.execute("""
+                    SELECT c.*, 
+                           (SELECT COUNT(*) FROM appointments WHERE customer_id = c.id) as app_count,
+                           (SELECT COUNT(*) FROM orders WHERE customer_id = c.id AND status = 'NORMAL') as order_count
+                    FROM customers c 
+                    WHERE c.name ILIKE %s OR c.phone ILIKE %s
+                    ORDER BY c.id DESC
+                """, (f"%{search_query}%", f"%{search_query}%"))
+            else:
+                cursor.execute("""
+                    SELECT c.*, 
+                           (SELECT COUNT(*) FROM appointments WHERE customer_id = c.id) as app_count,
+                           (SELECT COUNT(*) FROM orders WHERE customer_id = c.id AND status = 'NORMAL') as order_count
+                    FROM customers c 
+                    ORDER BY c.id DESC
+                """)
+            customers = cursor.fetchall()
             
     return render_template_string(LAYOUT_TEMPLATE.replace("{% block content %}{% endblock %}", """
         <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
@@ -607,31 +612,38 @@ def admin_add_customer():
     credits = float(request.form.get("credits", 0))
     token = secrets.token_hex(8)
     with get_db() as conn:
-        try:
-            conn.execute("INSERT INTO customers (name, phone, token, credits) VALUES (?, ?, ?, ?)", (name, phone, token, credits))
-        except:
-            pass
+        with conn.cursor() as cursor:
+            try:
+                cursor.execute("INSERT INTO customers (name, phone, token, credits) VALUES (%s, %s, %s, %s)", (name, phone, token, credits))
+                conn.commit()
+            except:
+                conn.rollback()
     return redirect(url_for("admin_customers"))
 
 @app.route("/admin/customer/detail/<int:id>")
 @admin_required
 def admin_customer_detail(id):
     with get_db() as conn:
-        cust = conn.execute("SELECT * FROM customers WHERE id = ?", (id,)).fetchone()
-        if not cust:
-            return "找不到该会员", 404
-        orders = conn.execute("""
-            SELECT o.*, i.item_name, i.price FROM orders o 
-            LEFT JOIN order_items i ON o.id = i.order_id 
-            WHERE o.customer_id = ? 
-            ORDER BY o.created_at DESC
-        """, (id,)).fetchall()
-        appointments = conn.execute("""
-            SELECT a.*, s.name as service_name FROM appointments a
-            JOIN services s ON a.service_id = s.id
-            WHERE a.customer_id = ?
-            ORDER BY a.start_time DESC
-        """, (id,)).fetchall()
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT * FROM customers WHERE id = %s", (id,))
+            cust = cursor.fetchone()
+            if not cust:
+                return "找不到该会员", 404
+            cursor.execute("""
+                SELECT o.*, i.item_name, i.price FROM orders o 
+                LEFT JOIN order_items i ON o.id = i.order_id 
+                WHERE o.customer_id = %s 
+                ORDER BY o.created_at DESC
+            """, (id,))
+            orders = cursor.fetchall()
+            cursor.execute("""
+                SELECT a.*, s.name as service_name FROM appointments a
+                JOIN services s ON a.service_id = s.id
+                WHERE a.customer_id = %s
+                ORDER BY a.start_time DESC
+            """, (id,))
+            appointments = cursor.fetchall()
+            
     return render_template_string(LAYOUT_TEMPLATE.replace("{% block content %}{% endblock %}", """
         <div class="bg-white p-6 rounded shadow space-y-6">
             <div class="flex justify-between items-center border-b pb-4">
@@ -863,36 +875,42 @@ def admin_appointments():
     start_loop = base_dt - timedelta(days=5)
     
     with get_db() as conn:
-        for i in range(15):
-            d = start_loop + timedelta(days=i)
-            d_str = d.strftime("%Y-%m-%d")
-            wd_map = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
-            wd_str = wd_map[d.weekday()]
-            if d_str == today_str: wd_str = "今天"
-            cnt = conn.execute("SELECT COUNT(*) FROM appointments WHERE start_time LIKE ? AND status = 'CONFIRMED'", (f"{d_str}%",)).fetchone()[0]
-            date_strip.append({"date_str": d_str, "display_date": d.strftime("%m-%d"), "weekday": wd_str, "count": cnt})
+        with conn.cursor() as cursor:
+            for i in range(15):
+                d = start_loop + timedelta(days=i)
+                d_str = d.strftime("%Y-%m-%d")
+                wd_map = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+                wd_str = wd_map[d.weekday()]
+                if d_str == today_str: wd_str = "今天"
+                cursor.execute("SELECT COUNT(*) FROM appointments WHERE start_time LIKE %s AND status = 'CONFIRMED'", (f"{d_str}%",))
+                cnt = cursor.fetchone()["count"]
+                date_strip.append({"date_str": d_str, "display_date": d.strftime("%m-%d"), "weekday": wd_str, "count": cnt})
+                
+            cursor.execute("""
+                SELECT a.*, c.name as customer_name, c.phone as customer_phone, s.name as service_name 
+                FROM appointments a 
+                JOIN customers c ON a.customer_id = c.id 
+                JOIN services s ON a.service_id = s.id 
+                WHERE a.start_time LIKE %s
+                ORDER BY a.start_time ASC
+            """, (f"{selected_date}%",))
+            appointments = cursor.fetchall()
             
-        appointments = conn.execute("""
-            SELECT a.*, c.name as customer_name, c.phone as customer_phone, s.name as service_name 
-            FROM appointments a 
-            JOIN customers c ON a.customer_id = c.id 
-            JOIN services s ON a.service_id = s.id 
-            WHERE a.start_time LIKE ?
-            ORDER BY a.start_time ASC
-        """, (f"{selected_date}%",)).fetchall()
+            cursor.execute("SELECT * FROM services WHERE category_type != 'Packages'")
+            services = cursor.fetchall()
+            cursor.execute("SELECT * FROM stylists")
+            stylists = cursor.fetchall()
+            cursor.execute("SELECT * FROM customers")
+            customers = cursor.fetchall()
         
-        services = conn.execute("SELECT * FROM services WHERE category_type != 'Packages'").fetchall()
-        stylists = conn.execute("SELECT * FROM stylists").fetchall()
-        customers = conn.execute("SELECT * FROM customers").fetchall()
-        
-        open_time_str = get_setting("open_time", "10:00")
-        close_time_str = get_setting("close_time", "20:00")
-        timeslots = []
-        st = datetime.strptime(open_time_str, "%H:%M")
-        et = datetime.strptime(close_time_str, "%H:%M")
-        while st <= et:
-            timeslots.append(st.strftime("%H:%M"))
-            st += timedelta(minutes=30)
+    open_time_str = get_setting("open_time", "10:00")
+    close_time_str = get_setting("close_time", "20:00")
+    timeslots = []
+    st = datetime.strptime(open_time_str, "%H:%M")
+    et = datetime.strptime(close_time_str, "%H:%M")
+    while st <= et:
+        timeslots.append(st.strftime("%H:%M"))
+        st += timedelta(minutes=30)
         
     return render_template_string(ADMIN_APPOINTMENTS_TEMPLATE, appointments=appointments, date_strip=date_strip, selected_date=selected_date, today_str=today_str, services=services, stylists=stylists, customers=customers, timeslots=timeslots)
 
@@ -907,24 +925,26 @@ def admin_add_appointment():
     c_phone = request.form.get("customer_phone")
     
     with get_db() as conn:
-        srv = conn.execute("SELECT duration FROM services WHERE id = ?", (service_id,)).fetchone()
-        duration = srv["duration"] if srv else 30
-        start_dt = datetime.strptime(f"{b_date} {b_time}", "%Y-%m-%d %H:%M")
-        end_dt = start_dt + timedelta(minutes=duration)
-        start_str = start_dt.strftime("%Y-%m-%d %H:%M")
-        end_str = end_dt.strftime("%Y-%m-%d %H:%M")
-        
-        cursor = conn.cursor()
-        cursor.execute("SELECT id FROM customers WHERE phone = ?", (c_phone,))
-        cust = cursor.fetchone()
-        if not cust:
-            token = secrets.token_hex(8)
-            cursor.execute("INSERT INTO customers (name, phone, token) VALUES (?, ?, ?)", (c_name, c_phone, token))
-            cust_id = cursor.lastrowid
-        else:
-            cust_id = cust["id"]
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT duration FROM services WHERE id = %s", (service_id,))
+            srv = cursor.fetchone()
+            duration = srv["duration"] if srv else 30
+            start_dt = datetime.strptime(f"{b_date} {b_time}", "%Y-%m-%d %H:%M")
+            end_dt = start_dt + timedelta(minutes=duration)
+            start_str = start_dt.strftime("%Y-%m-%d %H:%M")
+            end_str = end_dt.strftime("%Y-%m-%d %H:%M")
             
-        cursor.execute("INSERT INTO appointments (customer_id, service_id, stylist, start_time, end_time) VALUES (?, ?, ?, ?, ?)", (cust_id, service_id, stylist, start_str, end_str))
+            cursor.execute("SELECT id FROM customers WHERE phone = %s", (c_phone,))
+            cust = cursor.fetchone()
+            if not cust:
+                token = secrets.token_hex(8)
+                cursor.execute("INSERT INTO customers (name, phone, token) VALUES (%s, %s, %s) RETURNING id", (c_name, c_phone, token))
+                cust_id = cursor.fetchone()["id"]
+            else:
+                cust_id = cust["id"]
+                
+            cursor.execute("INSERT INTO appointments (customer_id, service_id, stylist, start_time, end_time) VALUES (%s, %s, %s, %s, %s)", (cust_id, service_id, stylist, start_str, end_str))
+            conn.commit()
         
     return redirect(url_for("admin_appointments", date=b_date))
 
@@ -932,7 +952,9 @@ def admin_add_appointment():
 @admin_required
 def delete_appointment(id):
     with get_db() as conn:
-        conn.execute("DELETE FROM appointments WHERE id = ?", (id,))
+        with conn.cursor() as cursor:
+            cursor.execute("DELETE FROM appointments WHERE id = %s", (id,))
+            conn.commit()
     return redirect(url_for("admin_appointments"))
 
 @app.route("/admin/orders")
@@ -942,22 +964,24 @@ def admin_orders():
     date_q = request.args.get("date", "").strip()
     
     with get_db() as conn:
-        query = """
-            SELECT o.*, c.name as customer_name, c.phone as customer_phone, c.token as customer_token 
-            FROM orders o 
-            JOIN customers c ON o.customer_id = c.id 
-            WHERE 1=1
-        """
-        params = []
-        if search_q:
-            query += " AND (o.order_no LIKE ? OR c.name LIKE ? OR c.phone LIKE ?)"
-            params.extend([f"%{search_q}%", f"%{search_q}%", f"%{search_q}%"])
-        if date_q:
-            query += " AND o.created_at LIKE ?"
-            params.append(f"{date_q}%")
-            
-        query += " ORDER BY o.created_at DESC"
-        orders = conn.execute(query, params).fetchall()
+        with conn.cursor() as cursor:
+            query = """
+                SELECT o.*, c.name as customer_name, c.phone as customer_phone, c.token as customer_token 
+                FROM orders o 
+                JOIN customers c ON o.customer_id = c.id 
+                WHERE 1=1
+            """
+            params = []
+            if search_q:
+                query += " AND (o.order_no ILIKE %s OR c.name ILIKE %s OR c.phone ILIKE %s)"
+                params.extend([f"%{search_q}%", f"%{search_q}%", f"%{search_q}%"])
+            if date_q:
+                query += " AND o.created_at LIKE %s"
+                params.append(f"{date_q}%")
+                
+            query += " ORDER BY o.created_at DESC"
+            cursor.execute(query, params)
+            orders = cursor.fetchall()
         
     return render_template_string(LAYOUT_TEMPLATE.replace("{% block content %}{% endblock %}", """
         <div class="bg-white p-6 rounded shadow space-y-4">
@@ -1024,20 +1048,25 @@ def admin_orders():
 def update_order_remark(id):
     remark = request.form.get("remark", "")
     with get_db() as conn:
-        conn.execute("UPDATE orders SET remark = ? WHERE id = ?", (remark, id))
+        with conn.cursor() as cursor:
+            cursor.execute("UPDATE orders SET remark = %s WHERE id = %s", (remark, id))
+            conn.commit()
     return redirect(url_for("admin_orders"))
 
 @app.route("/admin/order/whatsapp/<int:id>")
 @admin_required
 def admin_order_whatsapp(id):
     with get_db() as conn:
-        order = conn.execute("""
-            SELECT o.*, c.name as customer_name, c.phone as customer_phone, c.token as customer_token 
-            FROM orders o JOIN customers c ON o.customer_id = c.id WHERE o.id = ?
-        """, (id,)).fetchone()
-        if not order:
-            return "Order not found", 404
-        items = conn.execute("SELECT * FROM order_items WHERE order_id = ?", (id,)).fetchall()
+        with conn.cursor() as cursor:
+            cursor.execute("""
+                SELECT o.*, c.name as customer_name, c.phone as customer_phone, c.token as customer_token 
+                FROM orders o JOIN customers c ON o.customer_id = c.id WHERE o.id = %s
+            """, (id,))
+            order = cursor.fetchone()
+            if not order:
+                return "Order not found", 404
+            cursor.execute("SELECT * FROM order_items WHERE order_id = %s", (id,))
+            items = cursor.fetchall()
         
     items_str = "\n".join([f"- {item['item_name']}: RM {item['price']:.2f}" for item in items])
     portal_link = request.host_url.rstrip('/') + f"/customer/{order['customer_token']}"
@@ -1068,12 +1097,15 @@ def admin_order_whatsapp(id):
 @admin_required
 def admin_order_invoice(id):
     with get_db() as conn:
-        order = conn.execute("""
-            SELECT o.*, c.name as customer_name, c.phone as customer_phone, c.token as customer_token 
-            FROM orders o JOIN customers c ON o.customer_id = c.id WHERE o.id = ?
-        """, (id,)).fetchone()
-        if not order: return "Order not found", 404
-        items = conn.execute("SELECT * FROM order_items WHERE order_id = ?", (id,)).fetchall()
+        with conn.cursor() as cursor:
+            cursor.execute("""
+                SELECT o.*, c.name as customer_name, c.phone as customer_phone, c.token as customer_token 
+                FROM orders o JOIN customers c ON o.customer_id = c.id WHERE o.id = %s
+            """, (id,))
+            order = cursor.fetchone()
+            if not order: return "Order not found", 404
+            cursor.execute("SELECT * FROM order_items WHERE order_id = %s", (id,))
+            items = cursor.fetchall()
         
     return render_template_string("""
         <div style="max-width:550px;margin:40px auto;padding:25px;border:1px solid #ccc;font-family:sans-serif;border-radius:8px;background:#fff;box-shadow:0 2px 8px rgba(0,0,0,0.1);">
@@ -1124,28 +1156,33 @@ def admin_order_invoice(id):
 @admin_required
 def void_order(id):
     with get_db() as conn:
-        cursor = conn.cursor()
-        order = cursor.execute("SELECT * FROM orders WHERE id = ? AND status = 'NORMAL'", (id,)).fetchone()
-        if not order: return redirect(url_for("admin_orders"))
-        
-        cust_id = order["customer_id"]
-        total = order["total_amount"]
-        payment = order["payment_details"]
-        
-        items = cursor.execute("SELECT * FROM order_items WHERE order_id = ?", (id,)).fetchall()
-        cust = cursor.execute("SELECT credits FROM customers WHERE id = ?", (cust_id,)).fetchone()
-        current_credits = cust["credits"] if cust else 0.0
-        
-        for item in items:
-            srv = cursor.execute("SELECT credit_value FROM services WHERE name = ?", (item["item_name"],)).fetchone()
-            if srv and srv["credit_value"] > 0:
-                current_credits -= srv["credit_value"]
-        
-        if payment == "Credit Balance Deduct":
-            current_credits += total
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT * FROM orders WHERE id = %s AND status = 'NORMAL'", (id,))
+            order = cursor.fetchone()
+            if not order: return redirect(url_for("admin_orders"))
             
-        cursor.execute("UPDATE customers SET credits = ? WHERE id = ?", (max(0.0, current_credits), cust_id))
-        cursor.execute("UPDATE orders SET status = 'VOID' WHERE id = ?", (id,))
+            cust_id = order["customer_id"]
+            total = order["total_amount"]
+            payment = order["payment_details"]
+            
+            cursor.execute("SELECT * FROM order_items WHERE order_id = %s", (id,))
+            items = cursor.fetchall()
+            cursor.execute("SELECT credits FROM customers WHERE id = %s", (cust_id,))
+            cust = cursor.fetchone()
+            current_credits = cust["credits"] if cust else 0.0
+            
+            for item in items:
+                cursor.execute("SELECT credit_value FROM services WHERE name = %s", (item["item_name"],))
+                srv = cursor.fetchone()
+                if srv and srv["credit_value"] > 0:
+                    current_credits -= srv["credit_value"]
+            
+            if payment == "Credit Balance Deduct":
+                current_credits += total
+                
+            cursor.execute("UPDATE customers SET credits = %s WHERE id = %s", (max(0.0, current_credits), cust_id))
+            cursor.execute("UPDATE orders SET status = 'VOID' WHERE id = %s", (id,))
+            conn.commit()
         
     return redirect(url_for("admin_orders"))
 
@@ -1153,18 +1190,20 @@ def void_order(id):
 @admin_required
 def admin_reports():
     with get_db() as conn:
-        days_data = []
-        now_dt = datetime.now(MY_TZ)
-        for i in range(90):
-            d = now_dt - timedelta(days=i)
-            d_str = d.strftime("%Y-%m-%d")
-            row = conn.execute("""
-                SELECT COUNT(id) as cnt, SUM(total_amount) as total 
-                FROM orders WHERE status = 'NORMAL' AND created_at LIKE ?
-            """, (f"{d_str}%",)).fetchone()
-            cnt = row["cnt"] if row and row["cnt"] else 0
-            total = row["total"] if row and row["total"] else 0.0
-            days_data.append({"date_str": d_str, "count": cnt, "total": total})
+        with conn.cursor() as cursor:
+            days_data = []
+            now_dt = datetime.now(MY_TZ)
+            for i in range(90):
+                d = now_dt - timedelta(days=i)
+                d_str = d.strftime("%Y-%m-%d")
+                cursor.execute("""
+                    SELECT COUNT(id) as cnt, SUM(total_amount) as total 
+                    FROM orders WHERE status = 'NORMAL' AND created_at LIKE %s
+                """, (f"{d_str}%",))
+                row = cursor.fetchone()
+                cnt = row["cnt"] if row and row["cnt"] else 0
+                total = row["total"] if row and row["total"] else 0.0
+                days_data.append({"date_str": d_str, "count": cnt, "total": total})
             
     return render_template_string(LAYOUT_TEMPLATE.replace("{% block content %}{% endblock %}", """
         <div class="bg-white p-6 rounded shadow space-y-4">
@@ -1194,9 +1233,13 @@ def admin_reports():
 @admin_required
 def admin_pos():
     with get_db() as conn:
-        services = conn.execute("SELECT * FROM services").fetchall()
-        stylists = conn.execute("SELECT * FROM stylists").fetchall()
-        customers = conn.execute("SELECT * FROM customers").fetchall()
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT * FROM services")
+            services = cursor.fetchall()
+            cursor.execute("SELECT * FROM stylists")
+            stylists = cursor.fetchall()
+            cursor.execute("SELECT * FROM customers")
+            customers = cursor.fetchall()
     return render_template_string(LAYOUT_TEMPLATE.replace("{% block content %}{% endblock %}", """
         <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
             <div class="md:col-span-2 bg-white p-6 rounded-lg shadow">
@@ -1359,38 +1402,40 @@ def checkout():
         order_no = "INV" + datetime.now(MY_TZ).strftime("%Y%m%d%H%M%S")
         
         with get_db() as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT id, token, credits FROM customers WHERE phone = ?", (phone,))
-            cust = cursor.fetchone()
-            if cust:
-                cust_id = cust["id"]
-                cust_token = cust["token"]
-                current_credits = cust["credits"]
-            else:
-                cust_token = secrets.token_hex(8)
-                cursor.execute("INSERT INTO customers (name, phone, token, credits) VALUES (?, ?, ?, 0.0)", (name, phone, cust_token))
-                cust_id = cursor.lastrowid
-                current_credits = 0.0
-            
-            for item in cart_data:
-                srv = cursor.execute("SELECT credit_value FROM services WHERE name = ?", (item["name"],)).fetchone()
-                if srv and srv["credit_value"] > 0:
-                    current_credits += srv["credit_value"]
-                    cursor.execute("UPDATE customers SET credits = ? WHERE id = ?", (current_credits, cust_id))
-
-            if pay_method == "Credit Balance Deduct":
-                if current_credits < total: return "结算失败：该顾客 Credit 余额不足！", 400
-                current_credits -= total
-                cursor.execute("UPDATE customers SET credits = ? WHERE id = ?", (current_credits, cust_id))
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT id, token, credits FROM customers WHERE phone = %s", (phone,))
+                cust = cursor.fetchone()
+                if cust:
+                    cust_id = cust["id"]
+                    cust_token = cust["token"]
+                    current_credits = cust["credits"]
+                else:
+                    cust_token = secrets.token_hex(8)
+                    cursor.execute("INSERT INTO customers (name, phone, token, credits) VALUES (%s, %s, %s, 0.0) RETURNING id", (name, phone, cust_token))
+                    cust_id = cursor.fetchone()["id"]
+                    current_credits = 0.0
                 
-            cursor.execute("INSERT INTO orders (order_no, customer_id, total_amount, payment_details, status, created_at) VALUES (?, ?, ?, ?, 'NORMAL', ?)", (order_no, cust_id, total, pay_method, current_time_str))
-            order_id = cursor.lastrowid
-            
-            for item in cart_data:
-                cursor.execute("""
-                    INSERT INTO order_items (order_id, item_name, price, staff_name, commission) 
-                    VALUES (?, ?, ?, ?, ?)
-                """, (order_id, item["name"], item["price"], item.get("staff", ""), item.get("commission", 0.0)))
+                for item in cart_data:
+                    cursor.execute("SELECT credit_value FROM services WHERE name = %s", (item["name"],))
+                    srv = cursor.fetchone()
+                    if srv and srv["credit_value"] > 0:
+                        current_credits += srv["credit_value"]
+                        cursor.execute("UPDATE customers SET credits = %s WHERE id = %s", (current_credits, cust_id))
+
+                if pay_method == "Credit Balance Deduct":
+                    if current_credits < total: return "结算失败：该顾客 Credit 余额不足！", 400
+                    current_credits -= total
+                    cursor.execute("UPDATE customers SET credits = %s WHERE id = %s", (current_credits, cust_id))
+                    
+                cursor.execute("INSERT INTO orders (order_no, customer_id, total_amount, payment_details, status, created_at) VALUES (%s, %s, %s, %s, 'NORMAL', %s) RETURNING id", (order_no, cust_id, total, pay_method, current_time_str))
+                order_id = cursor.fetchone()["id"]
+                
+                for item in cart_data:
+                    cursor.execute("""
+                        INSERT INTO order_items (order_id, item_name, price, staff_name, commission) 
+                        VALUES (%s, %s, %s, %s, %s)
+                    """, (order_id, item["name"], item["price"], item.get("staff", ""), item.get("commission", 0.0)))
+                conn.commit()
                 
         return f"""
             <div style="max-width:500px;margin:50px auto;padding:20px;border:1px solid #ccc;font-family:sans-serif;border-radius:8px;background:#fff;">
@@ -1543,26 +1588,28 @@ def public_booking():
         c_phone = request.form.get("customer_phone")
         
         with get_db() as conn:
-            srv = conn.execute("SELECT duration FROM services WHERE id = ?", (service_id,)).fetchone()
-            duration = srv["duration"] if srv else 30
-            start_dt = datetime.strptime(f"{b_date} {b_time}", "%Y-%m-%d %H:%M")
-            end_dt = start_dt + timedelta(minutes=duration)
-            start_str = start_dt.strftime("%Y-%m-%d %H:%M")
-            end_str = end_dt.strftime("%Y-%m-%d %H:%M")
-            
-            cursor = conn.cursor()
-            cursor.execute("SELECT id, token FROM customers WHERE phone = ?", (c_phone,))
-            cust = cursor.fetchone()
-            if not cust:
-                token = secrets.token_hex(8)
-                cursor.execute("INSERT INTO customers (name, phone, token) VALUES (?, ?, ?)", (c_name, c_phone, token))
-                cust_token = token
-                cust_id = cursor.lastrowid
-            else:
-                cust_token = cust["token"]
-                cust_id = cust["id"]
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT duration FROM services WHERE id = %s", (service_id,))
+                srv = cursor.fetchone()
+                duration = srv["duration"] if srv else 30
+                start_dt = datetime.strptime(f"{b_date} {b_time}", "%Y-%m-%d %H:%M")
+                end_dt = start_dt + timedelta(minutes=duration)
+                start_str = start_dt.strftime("%Y-%m-%d %H:%M")
+                end_str = end_dt.strftime("%Y-%m-%d %H:%M")
                 
-            cursor.execute("INSERT INTO appointments (customer_id, service_id, stylist, start_time, end_time) VALUES (?, ?, ?, ?, ?)", (cust_id, service_id, stylist, start_str, end_str))
+                cursor.execute("SELECT id, token FROM customers WHERE phone = %s", (c_phone,))
+                cust = cursor.fetchone()
+                if not cust:
+                    token = secrets.token_hex(8)
+                    cursor.execute("INSERT INTO customers (name, phone, token) VALUES (%s, %s, %s) RETURNING id", (c_name, c_phone, token))
+                    cust_token = token
+                    cust_id = cursor.fetchone()["id"]
+                else:
+                    cust_token = cust["token"]
+                    cust_id = cust["id"]
+                    
+                cursor.execute("INSERT INTO appointments (customer_id, service_id, stylist, start_time, end_time) VALUES (%s, %s, %s, %s, %s)", (cust_id, service_id, stylist, start_str, end_str))
+                conn.commit()
             
         return f"""
             <div style="max-width:400px;margin:50px auto;text-align:center;font-family:sans-serif;padding:30px;border:1px solid #ddd;border-radius:8px;background:#fff;">
@@ -1587,8 +1634,11 @@ def public_booking_render(error=None):
         st += timedelta(minutes=30)
         
     with get_db() as conn:
-        services = conn.execute("SELECT * FROM services WHERE category_type != 'Packages'").fetchall()
-        stylists = conn.execute("SELECT * FROM stylists").fetchall()
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT * FROM services WHERE category_type != 'Packages'")
+            services = cursor.fetchall()
+            cursor.execute("SELECT * FROM stylists")
+            stylists = cursor.fetchall()
         
     today_str = get_current_date()
     selected_date = request.args.get("date", today_str)
@@ -1606,20 +1656,24 @@ def public_booking_render(error=None):
 @app.route("/customer/<token>")
 def customer_profile(token):
     with get_db() as conn:
-        cust = conn.execute("SELECT * FROM customers WHERE token = ?", (token,)).fetchone()
-        if not cust: return "Invalid customer link.", 404
-        orders = conn.execute("""
-            SELECT o.*, i.item_name, i.price FROM orders o 
-            LEFT JOIN order_items i ON o.id = i.order_id 
-            WHERE o.customer_id = ? 
-            ORDER BY o.created_at DESC
-        """, (cust["id"],)).fetchall()
-        appointments = conn.execute("""
-            SELECT a.*, s.name as service_name FROM appointments a
-            JOIN services s ON a.service_id = s.id
-            WHERE a.customer_id = ?
-            ORDER BY a.start_time DESC
-        """, (cust["id"],)).fetchall()
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT * FROM customers WHERE token = %s", (token,))
+            cust = cursor.fetchone()
+            if not cust: return "Invalid customer link.", 404
+            cursor.execute("""
+                SELECT o.*, i.item_name, i.price FROM orders o 
+                LEFT JOIN order_items i ON o.id = i.order_id 
+                WHERE o.customer_id = %s 
+                ORDER BY o.created_at DESC
+            """, (cust["id"],))
+            orders = cursor.fetchall()
+            cursor.execute("""
+                SELECT a.*, s.name as service_name FROM appointments a
+                JOIN services s ON a.service_id = s.id
+                WHERE a.customer_id = %s
+                ORDER BY a.start_time DESC
+            """, (cust["id"],))
+            appointments = cursor.fetchall()
         
     return render_template_string("""
         <!DOCTYPE html>
