@@ -26,12 +26,13 @@ def get_current_date():
     return datetime.now(MY_TZ).strftime("%Y-%m-%d")
 
 # ==========================================
-# PostgreSQL 数据库连接配置 (Render 生产环境与本地通用)
+# PostgreSQL 数据库连接配置 (完美适配 Render + PgBouncer 事务池)
 # ==========================================
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
 def get_db():
     if DATABASE_URL:
+        # 兼容 PgBouncer 事务模式及参数解析
         conn = psycopg2.connect(DATABASE_URL, cursor_factory=psycopg2.extras.RealDictCursor)
     else:
         conn = psycopg2.connect("dbname=salon user=postgres password=postgres", cursor_factory=psycopg2.extras.RealDictCursor)
