@@ -59,6 +59,9 @@ def init_db():
                     title TEXT NOT NULL
                 );
             """)
+            # 兼容旧库：补上佣金方式与佣金数值字段
+            cursor.execute("ALTER TABLE stylists ADD COLUMN IF NOT EXISTS commission_type TEXT DEFAULT 'percent'")
+            cursor.execute("ALTER TABLE stylists ADD COLUMN IF NOT EXISTS commission_value DOUBLE PRECISION DEFAULT 0.0")
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS customers (
                     id SERIAL PRIMARY KEY,
@@ -117,6 +120,15 @@ def init_db():
                     id SERIAL PRIMARY KEY,
                     date_str TEXT UNIQUE NOT NULL,
                     reason TEXT
+                );
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS order_item_staff (
+                    id SERIAL PRIMARY KEY,
+                    order_item_id INTEGER NOT NULL,
+                    staff_name TEXT NOT NULL,
+                    commission_amount DOUBLE PRECISION DEFAULT 0.0,
+                    FOREIGN KEY(order_item_id) REFERENCES order_items(id) ON DELETE CASCADE
                 );
             """)
             
@@ -184,7 +196,9 @@ LAYOUT_TEMPLATE = """
                 <a href="/admin/customers" class="hover:bg-indigo-700 px-2 py-1 rounded">会员与历史记录</a>
                 <a href="/admin/orders" class="hover:bg-indigo-700 px-2 py-1 rounded">订单历史</a>
                 <a href="/admin" class="hover:bg-indigo-700 px-2 py-1 rounded">营业、项目与员工</a>
+                <a href="/admin/staff" class="hover:bg-indigo-700 px-2 py-1 rounded">员工与佣金管理</a>
                 <a href="/admin/reports" class="hover:bg-indigo-700 px-2 py-1 rounded">90天报表</a>
+                <a href="/" target="_blank" class="bg-green-600 px-2 py-1 rounded hover:bg-green-700">🔗 顾客预约页面</a>
                 <a href="/admin/logout" class="bg-red-500 px-2 py-1 rounded hover:bg-red-600">退出</a>
             </div>
         </div>
@@ -239,15 +253,35 @@ def admin_dashboard():
             holidays = cursor.fetchall()
             
             cursor.execute("""
-                SELECT i.staff_name, 
-                       COUNT(i.id) as item_count,
-                       SUM(i.price) as total_sales,
-                       SUM(i.commission) as total_commission
-                FROM order_items i
-                JOIN orders o ON i.order_id = o.id
-                WHERE o.status = 'NORMAL' AND o.created_at LIKE %s AND i.staff_name != '' AND i.staff_name IS NOT NULL
-                GROUP BY i.staff_name
-            """, (f"{current_month_prefix}%",))
+                SELECT staff_name, SUM(item_count) as item_count, SUM(total_sales) as total_sales, SUM(total_commission) as total_commission
+                FROM (
+                    -- 新版协作结账记录（更新后产生的订单）
+                    SELECT os.staff_name as staff_name,
+                           COUNT(os.id) as item_count,
+                           SUM(i.price) as total_sales,
+                           SUM(os.commission_amount) as total_commission
+                    FROM order_item_staff os
+                    JOIN order_items i ON os.order_item_id = i.id
+                    JOIN orders o ON i.order_id = o.id
+                    WHERE o.status = 'NORMAL' AND o.created_at LIKE %s
+                    GROUP BY os.staff_name
+
+                    UNION ALL
+
+                    -- 旧版单员工记录（更新前产生的订单，没有协作明细表数据）
+                    SELECT i.staff_name as staff_name,
+                           COUNT(i.id) as item_count,
+                           SUM(i.price) as total_sales,
+                           SUM(i.commission) as total_commission
+                    FROM order_items i
+                    JOIN orders o ON i.order_id = o.id
+                    WHERE o.status = 'NORMAL' AND o.created_at LIKE %s
+                      AND i.staff_name IS NOT NULL AND i.staff_name != ''
+                      AND NOT EXISTS (SELECT 1 FROM order_item_staff os2 WHERE os2.order_item_id = i.id)
+                ) combined
+                GROUP BY staff_name
+                ORDER BY total_commission DESC
+            """, (f"{current_month_prefix}%", f"{current_month_prefix}%"))
             staff_performance = cursor.fetchall()
         
     return render_template_string(LAYOUT_TEMPLATE.replace("{% block content %}{% endblock %}", """
@@ -331,7 +365,10 @@ def admin_dashboard():
 
                 <!-- 员工团队管理 -->
                 <div class="bg-white p-6 rounded shadow">
-                    <h2 class="text-xl font-bold mb-4">发型师 / 员工团队管理</h2>
+                    <div class="flex justify-between items-center mb-4">
+                        <h2 class="text-xl font-bold">发型师 / 员工团队管理</h2>
+                        <a href="/admin/staff" class="bg-indigo-600 text-white px-3 py-1.5 rounded text-sm font-bold hover:bg-indigo-700">👥 前往员工与佣金管理 →</a>
+                    </div>
                     <table class="w-full text-left">
                         <thead><tr class="border-b"><th class="p-2">姓名</th><th class="p-2">职级/头衔</th><th class="p-2">操作</th></tr></thead>
                         <tbody>
@@ -434,13 +471,21 @@ def admin_dashboard():
 def add_stylist():
     name = request.form.get("name")
     title = request.form.get("title")
+    commission_type = request.form.get("commission_type", "percent")
+    commission_value = float(request.form.get("commission_value", 0) or 0)
     with get_db() as conn:
         with conn.cursor() as cursor:
             try:
-                cursor.execute("INSERT INTO stylists (name, title) VALUES (%s, %s)", (name, title))
+                cursor.execute("""
+                    INSERT INTO stylists (name, title, commission_type, commission_value)
+                    VALUES (%s, %s, %s, %s)
+                """, (name, title, commission_type, commission_value))
                 conn.commit()
             except:
                 conn.rollback()
+    # 从员工管理页添加的，添加完返回员工管理页；否则返回原来的总览页
+    if request.referrer and "/admin/staff" in request.referrer:
+        return redirect(url_for("admin_staff"))
     return redirect(url_for("admin_dashboard"))
 
 @app.route("/admin/stylist/delete/<int:id>")
@@ -451,6 +496,106 @@ def delete_stylist(id):
             cursor.execute("DELETE FROM stylists WHERE id = %s", (id,))
             conn.commit()
     return redirect(url_for("admin_dashboard"))
+
+STAFF_MANAGEMENT_TEMPLATE = """
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+        <div class="md:col-span-2 bg-white p-6 rounded shadow">
+            <h2 class="text-xl font-bold mb-4 text-indigo-600">👥 员工与佣金管理</h2>
+            <table class="w-full text-left border-collapse">
+                <thead>
+                    <tr class="border-b bg-gray-50 text-sm">
+                        <th class="p-2">姓名</th>
+                        <th class="p-2">职级/头衔</th>
+                        <th class="p-2">提成方式</th>
+                        <th class="p-2">提成数值</th>
+                        <th class="p-2">操作</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for st in stylists %}
+                    <tr class="border-b" id="row-{{ st.id }}">
+                        <form action="/admin/staff/update/{{ st.id }}" method="POST" class="contents">
+                        <td class="p-2">
+                            <input type="text" name="name" value="{{ st.name }}" class="border rounded p-1.5 w-full font-bold text-indigo-600" required>
+                        </td>
+                        <td class="p-2">
+                            <input type="text" name="title" value="{{ st.title }}" class="border rounded p-1.5 w-full" required>
+                        </td>
+                        <td class="p-2">
+                            <select name="commission_type" class="border rounded p-1.5">
+                                <option value="percent" {% if st.commission_type == 'percent' %}selected{% endif %}>按百分比 (%)</option>
+                                <option value="fixed" {% if st.commission_type == 'fixed' %}selected{% endif %}>固定金额 (RM)</option>
+                            </select>
+                        </td>
+                        <td class="p-2">
+                            <input type="number" step="0.01" name="commission_value" value="{{ st.commission_value }}" class="border rounded p-1.5 w-24">
+                        </td>
+                        <td class="p-2 flex gap-2 items-center">
+                            <button class="bg-indigo-600 text-white px-3 py-1 rounded text-xs font-bold hover:bg-indigo-700">保存</button>
+                        </form>
+                            <a href="/admin/stylist/delete/{{ st.id }}" onclick="return confirm('确定要删除该员工吗？')" class="text-red-500 text-xs font-bold">删除</a>
+                        </td>
+                    </tr>
+                    {% else %}
+                    <tr><td colspan="5" class="p-3 text-gray-400">暂无员工，请在右侧添加</td></tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            <p class="text-xs text-gray-500 mt-3">💡 提成方式说明：选择「按百分比」时，员工做该项目会按售价的百分比自动计算建议佣金；选择「固定金额」则每次固定建议这个金额，两种方式都可以在 POS 收银时临时手动调整具体金额。</p>
+        </div>
+
+        <div class="bg-white p-6 rounded shadow h-fit">
+            <h2 class="text-xl font-bold mb-4">添加新员工</h2>
+            <form action="/admin/stylist/add" method="POST">
+                <div class="mb-3">
+                    <label class="block text-sm font-medium">姓名</label>
+                    <input type="text" name="name" class="w-full border rounded p-2" required placeholder="如: Kevin">
+                </div>
+                <div class="mb-3">
+                    <label class="block text-sm font-medium">职级 / 简介</label>
+                    <input type="text" name="title" class="w-full border rounded p-2" required placeholder="如: 高级造型师">
+                </div>
+                <div class="mb-3">
+                    <label class="block text-sm font-medium">提成方式</label>
+                    <select name="commission_type" class="w-full border rounded p-2">
+                        <option value="percent">按百分比 (%)</option>
+                        <option value="fixed">固定金额 (RM)</option>
+                    </select>
+                </div>
+                <div class="mb-4">
+                    <label class="block text-sm font-medium">提成数值</label>
+                    <input type="number" step="0.01" name="commission_value" class="w-full border rounded p-2" value="0" placeholder="例如: 20 (代表20%) 或 15 (代表RM15)">
+                </div>
+                <button class="w-full bg-indigo-600 text-white font-bold py-2 rounded hover:bg-indigo-700">确认添加员工</button>
+            </form>
+        </div>
+    </div>
+"""
+
+@app.route("/admin/staff")
+@admin_required
+def admin_staff():
+    with get_db() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT * FROM stylists ORDER BY id DESC")
+            stylists = cursor.fetchall()
+    return render_template_string(LAYOUT_TEMPLATE.replace("{% block content %}{% endblock %}", STAFF_MANAGEMENT_TEMPLATE), stylists=stylists)
+
+@app.route("/admin/staff/update/<int:id>", methods=["POST"])
+@admin_required
+def admin_staff_update(id):
+    name = request.form.get("name")
+    title = request.form.get("title")
+    commission_type = request.form.get("commission_type", "percent")
+    commission_value = float(request.form.get("commission_value", 0) or 0)
+    with get_db() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute("""
+                UPDATE stylists SET name = %s, title = %s, commission_type = %s, commission_value = %s
+                WHERE id = %s
+            """, (name, title, commission_type, commission_value, id))
+            conn.commit()
+    return redirect(url_for("admin_staff"))
 
 @app.route("/admin/settings/update", methods=["POST"])
 @admin_required
@@ -715,7 +860,9 @@ ADMIN_APPOINTMENTS_TEMPLATE = """
                 <a href="/admin/customers" class="hover:bg-indigo-700 px-2 py-1 rounded">会员与历史记录</a>
                 <a href="/admin/orders" class="hover:bg-indigo-700 px-2 py-1 rounded">订单历史</a>
                 <a href="/admin" class="hover:bg-indigo-700 px-2 py-1 rounded">营业、项目与员工</a>
+                <a href="/admin/staff" class="hover:bg-indigo-700 px-2 py-1 rounded">员工与佣金管理</a>
                 <a href="/admin/reports" class="hover:bg-indigo-700 px-2 py-1 rounded">90天报表</a>
+                <a href="/" target="_blank" class="bg-green-600 px-2 py-1 rounded hover:bg-green-700">🔗 顾客预约页面</a>
                 <a href="/admin/logout" class="bg-red-500 px-2 py-1 rounded hover:bg-red-600">退出</a>
             </div>
         </div>
@@ -874,16 +1021,25 @@ def admin_appointments():
     base_dt = datetime.strptime(selected_date, "%Y-%m-%d")
     start_loop = base_dt - timedelta(days=5)
     
+    end_loop = start_loop + timedelta(days=14)
     with get_db() as conn:
         with conn.cursor() as cursor:
+            # 一次性查出这 15 天内每天的预约数量，避免逐天单独查询造成的多次网络往返
+            cursor.execute("""
+                SELECT LEFT(start_time, 10) as day_str, COUNT(*) as cnt
+                FROM appointments
+                WHERE status = 'CONFIRMED' AND start_time >= %s AND start_time < %s
+                GROUP BY LEFT(start_time, 10)
+            """, (start_loop.strftime("%Y-%m-%d"), (end_loop + timedelta(days=1)).strftime("%Y-%m-%d")))
+            counts_map = {row["day_str"]: row["cnt"] for row in cursor.fetchall()}
+
             for i in range(15):
                 d = start_loop + timedelta(days=i)
                 d_str = d.strftime("%Y-%m-%d")
                 wd_map = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
                 wd_str = wd_map[d.weekday()]
                 if d_str == today_str: wd_str = "今天"
-                cursor.execute("SELECT COUNT(*) FROM appointments WHERE start_time LIKE %s AND status = 'CONFIRMED'", (f"{d_str}%",))
-                cnt = cursor.fetchone()["count"]
+                cnt = counts_map.get(d_str, 0)
                 date_strip.append({"date_str": d_str, "display_date": d.strftime("%m-%d"), "weekday": wd_str, "count": cnt})
                 
             cursor.execute("""
@@ -1106,6 +1262,9 @@ def admin_order_invoice(id):
             if not order: return "Order not found", 404
             cursor.execute("SELECT * FROM order_items WHERE order_id = %s", (id,))
             items = cursor.fetchall()
+            for item in items:
+                cursor.execute("SELECT staff_name, commission_amount FROM order_item_staff WHERE order_item_id = %s", (item["id"],))
+                item["collaborators"] = cursor.fetchall()
         
     return render_template_string("""
         <div style="max-width:550px;margin:40px auto;padding:25px;border:1px solid #ccc;font-family:sans-serif;border-radius:8px;background:#fff;box-shadow:0 2px 8px rgba(0,0,0,0.1);">
@@ -1132,10 +1291,17 @@ def admin_order_invoice(id):
                     {% for item in items %}
                     <tr style="border-bottom:1px solid #eee;">
                         <td style="padding:6px;">{{ item.item_name }}</td>
-                        <td style="padding:6px;color:#4f46e5;">{{ item.staff_name or '-' }}</td>
+                        <td style="padding:6px;color:#4f46e5;">
+                            {% if item.collaborators %}
+                                {% for c in item.collaborators %}
+                                    <div>{{ c.staff_name }} <span style="color:green;font-size:11px;">(RM {{ "%.2f"|format(c.commission_amount) }})</span></div>
+                                {% endfor %}
+                            {% elif item.staff_name %}
+                                <div>{{ item.staff_name }} {% if item.commission > 0 %}<span style="color:green;font-size:11px;">(RM {{ "%.2f"|format(item.commission) }})</span>{% endif %}</div>
+                            {% else %}-{% endif %}
+                        </td>
                         <td style="text-align:right;padding:6px;">
                             RM {{ "%.2f"|format(item.price) }}
-                            {% if item.commission > 0 %}<br><span style="font-size:11px;color:green;">(佣金: RM {{ "%.2f"|format(item.commission) }})</span>{% endif %}
                         </td>
                     </tr>
                     {% endfor %}
@@ -1193,14 +1359,19 @@ def admin_reports():
         with conn.cursor() as cursor:
             days_data = []
             now_dt = datetime.now(MY_TZ)
+            range_start = (now_dt - timedelta(days=89)).strftime("%Y-%m-%d")
+            # 一次性按天汇总最近 90 天的订单数据，避免 90 次单独查询
+            cursor.execute("""
+                SELECT LEFT(created_at, 10) as day_str, COUNT(id) as cnt, SUM(total_amount) as total
+                FROM orders
+                WHERE status = 'NORMAL' AND created_at >= %s
+                GROUP BY LEFT(created_at, 10)
+            """, (range_start,))
+            day_map = {row["day_str"]: row for row in cursor.fetchall()}
             for i in range(90):
                 d = now_dt - timedelta(days=i)
                 d_str = d.strftime("%Y-%m-%d")
-                cursor.execute("""
-                    SELECT COUNT(id) as cnt, SUM(total_amount) as total 
-                    FROM orders WHERE status = 'NORMAL' AND created_at LIKE %s
-                """, (f"{d_str}%",))
-                row = cursor.fetchone()
+                row = day_map.get(d_str)
                 cnt = row["cnt"] if row and row["cnt"] else 0
                 total = row["total"] if row and row["total"] else 0.0
                 days_data.append({"date_str": d_str, "count": cnt, "total": total})
@@ -1240,6 +1411,10 @@ def admin_pos():
             stylists = cursor.fetchall()
             cursor.execute("SELECT * FROM customers")
             customers = cursor.fetchall()
+    stylists_json = json.dumps([
+        {"name": st["name"], "title": st["title"], "commission_type": st["commission_type"], "commission_value": st["commission_value"]}
+        for st in stylists
+    ])
     return render_template_string(LAYOUT_TEMPLATE.replace("{% block content %}{% endblock %}", """
         <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
             <div class="md:col-span-2 bg-white p-6 rounded-lg shadow">
@@ -1292,27 +1467,25 @@ def admin_pos():
             </div>
         </div>
         
-        <!-- 员工与佣金配置弹窗 -->
+        <!-- 协作员工与佣金配置弹窗 -->
         <div id="staffModal" class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 hidden">
-            <div class="bg-white p-6 rounded-xl shadow-xl max-w-sm w-full">
-                <h3 class="text-lg font-bold mb-3 text-indigo-600">设置服务员工与佣金</h3>
+            <div class="bg-white p-6 rounded-xl shadow-xl max-w-md w-full max-h-[85vh] overflow-y-auto">
+                <h3 class="text-lg font-bold mb-1 text-indigo-600">设置协作员工与佣金</h3>
                 <p id="modal_item_name" class="text-sm font-medium text-gray-700 mb-3"></p>
-                <div class="mb-3">
-                    <label class="block text-sm font-bold mb-1">选择负责员工</label>
-                    <select id="modal_staff_name" class="w-full border rounded p-2 text-sm">
-                        <option value="">-- 无特定员工 --</option>
-                        {% for st in stylists %}
-                        <option value="{{ st.name }}">{{ st.name }} ({{ st.title }})</option>
-                        {% endfor %}
-                    </select>
+
+                <div id="collaborator_list" class="space-y-2 mb-3"></div>
+
+                <button type="button" onclick="addCollaboratorRow()" class="w-full border-2 border-dashed border-indigo-300 text-indigo-600 font-bold py-2 rounded text-sm hover:bg-indigo-50 mb-4">
+                    + 添加协作员工
+                </button>
+
+                <div class="text-right text-sm font-bold text-gray-700 mb-4">
+                    佣金总额: RM <span id="modal_total_commission">0.00</span>
                 </div>
-                <div class="mb-4">
-                    <label class="block text-sm font-bold mb-1">提成佣金金额 (RM)</label>
-                    <input type="number" step="0.01" id="modal_commission" class="w-full border rounded p-2 text-sm" value="0.00">
-                </div>
+
                 <div class="flex justify-end gap-2">
                     <button type="button" onclick="closeStaffModal()" class="bg-gray-300 px-3 py-1.5 rounded text-sm font-bold">取消</button>
-                    <button type="button" onclick="saveStaffModal()" class="bg-indigo-600 text-white px-4 py-1.5 rounded text-sm font-bold">确定</button>
+                    <button type="button" onclick="saveStaffModal()" class="bg-indigo-600 text-white px-4 py-1.5 rounded text-sm font-bold">确定保存</button>
                 </div>
             </div>
         </div>
@@ -1320,19 +1493,85 @@ def admin_pos():
         <script>
             let cart = [];
             let editingIndex = null;
+            const STYLISTS = {{ stylists_json|safe }};
 
             function addToOrder(name, price) {
-                cart.push({name, price, staff: '', commission: 0});
+                cart.push({name, price, collaborators: []});
                 renderCart();
+            }
+
+            // 根据员工自己设置的提成方式，自动算出这一笔项目该给他的建议佣金
+            function calcSuggestedCommission(staffName, itemPrice) {
+                const st = STYLISTS.find(s => s.name === staffName);
+                if (!st) return 0;
+                if (st.commission_type === 'percent') {
+                    return Math.round(itemPrice * (st.commission_value / 100) * 100) / 100;
+                }
+                return st.commission_value;
             }
 
             function openStaffModal(index) {
                 editingIndex = index;
                 const item = cart[index];
                 document.getElementById('modal_item_name').innerText = "项目: " + item.name + " (售价: RM " + item.price.toFixed(2) + ")";
-                document.getElementById('modal_staff_name').value = item.staff || '';
-                document.getElementById('modal_commission').value = item.commission || 0;
+                if (!item.collaborators || item.collaborators.length === 0) {
+                    item.collaborators = [{staff: '', commission: 0}];
+                }
+                renderCollaboratorRows(item.collaborators);
                 document.getElementById('staffModal').classList.remove('hidden');
+            }
+
+            function renderCollaboratorRows(collaborators) {
+                const list = document.getElementById('collaborator_list');
+                list.innerHTML = '';
+                collaborators.forEach((c, i) => {
+                    const options = STYLISTS.map(st =>
+                        `<option value="${st.name}" ${c.staff === st.name ? 'selected' : ''}>${st.name} (${st.title})</option>`
+                    ).join('');
+                    const row = document.createElement('div');
+                    row.className = 'flex gap-2 items-center border rounded p-2 bg-gray-50';
+                    row.innerHTML = `
+                        <select class="collab-staff border rounded p-1.5 text-sm flex-grow" onchange="onCollaboratorStaffChange(${i}, this)">
+                            <option value="">-- 选择员工 --</option>
+                            ${options}
+                        </select>
+                        <input type="number" step="0.01" class="collab-commission border rounded p-1.5 text-sm w-24" value="${c.commission}" onchange="onCollaboratorCommissionChange(${i}, this)">
+                        <button type="button" onclick="removeCollaboratorRow(${i})" class="text-red-500 font-bold px-1">×</button>
+                    `;
+                    list.appendChild(row);
+                });
+                updateModalTotal();
+            }
+
+            function currentItem() { return cart[editingIndex]; }
+
+            function addCollaboratorRow() {
+                currentItem().collaborators.push({staff: '', commission: 0});
+                renderCollaboratorRows(currentItem().collaborators);
+            }
+
+            function removeCollaboratorRow(i) {
+                currentItem().collaborators.splice(i, 1);
+                renderCollaboratorRows(currentItem().collaborators);
+            }
+
+            function onCollaboratorStaffChange(i, sel) {
+                const item = currentItem();
+                item.collaborators[i].staff = sel.value;
+                // 自动带入这位员工按自己提成设置算出的建议佣金，方便直接用或手动改
+                item.collaborators[i].commission = calcSuggestedCommission(sel.value, item.price);
+                renderCollaboratorRows(item.collaborators);
+            }
+
+            function onCollaboratorCommissionChange(i, input) {
+                currentItem().collaborators[i].commission = parseFloat(input.value) || 0;
+                updateModalTotal();
+            }
+
+            function updateModalTotal() {
+                const item = currentItem();
+                const total = (item.collaborators || []).reduce((sum, c) => sum + (parseFloat(c.commission) || 0), 0);
+                document.getElementById('modal_total_commission').innerText = total.toFixed(2);
             }
 
             function closeStaffModal() {
@@ -1341,9 +1580,9 @@ def admin_pos():
             }
 
             function saveStaffModal() {
-                if(editingIndex !== null) {
-                    cart[editingIndex].staff = document.getElementById('modal_staff_name').value;
-                    cart[editingIndex].commission = parseFloat(document.getElementById('modal_commission').value) || 0;
+                if (editingIndex !== null) {
+                    // 去掉没有选员工的空行
+                    cart[editingIndex].collaborators = (cart[editingIndex].collaborators || []).filter(c => c.staff);
                     renderCart();
                 }
                 closeStaffModal();
@@ -1359,15 +1598,19 @@ def admin_pos():
                 let total = 0; container.innerHTML = '';
                 cart.forEach((item, index) => {
                     total += item.price;
+                    const collabs = item.collaborators || [];
+                    const staffSummary = collabs.length > 0
+                        ? collabs.map(c => `${c.staff}(RM${c.commission.toFixed(2)})`).join(' + ')
+                        : '无';
                     container.innerHTML += `
                         <div class="flex justify-between items-center py-2 border-b text-sm">
                             <div>
                                 <div class="font-bold">${item.name}</div>
-                                <div class="text-xs text-gray-500">员工: ${item.staff || '无'} | 佣金: RM ${item.commission.toFixed(2)}</div>
+                                <div class="text-xs text-gray-500">协作员工: ${staffSummary}</div>
                             </div>
                             <div class="flex items-center gap-2">
                                 <span class="font-bold">RM ${item.price.toFixed(2)}</span>
-                                <button type="button" onclick="openStaffModal(${index})" class="text-indigo-600 text-xs bg-indigo-50 px-2 py-1 rounded font-bold">设置员工</button>
+                                <button type="button" onclick="openStaffModal(${index})" class="text-indigo-600 text-xs bg-indigo-50 px-2 py-1 rounded font-bold">+ 添加协作员工</button>
                                 <button type="button" onclick="removeFromCart(${index})" class="text-red-500 font-bold">×</button>
                             </div>
                         </div>`;
@@ -1384,7 +1627,7 @@ def admin_pos():
                 }
             }
         </script>
-    """), services=services, stylists=stylists, customers=customers)
+    """), services=services, stylists=stylists, customers=customers, stylists_json=stylists_json)
 
 @app.route("/admin/checkout", methods=["POST"])
 @admin_required
@@ -1431,10 +1674,27 @@ def checkout():
                 order_id = cursor.fetchone()["id"]
                 
                 for item in cart_data:
+                    collaborators = item.get("collaborators", [])
+                    # 兼容旧版单员工数据结构（如果前端还是传 staff/commission 单字段）
+                    if not collaborators and item.get("staff"):
+                        collaborators = [{"staff": item.get("staff"), "commission": item.get("commission", 0.0)}]
+
+                    total_item_commission = sum(float(c.get("commission", 0) or 0) for c in collaborators)
+                    primary_staff = ", ".join(c["staff"] for c in collaborators if c.get("staff")) if collaborators else ""
+
                     cursor.execute("""
                         INSERT INTO order_items (order_id, item_name, price, staff_name, commission) 
-                        VALUES (%s, %s, %s, %s, %s)
-                    """, (order_id, item["name"], item["price"], item.get("staff", ""), item.get("commission", 0.0)))
+                        VALUES (%s, %s, %s, %s, %s) RETURNING id
+                    """, (order_id, item["name"], item["price"], primary_staff, total_item_commission))
+                    order_item_id = cursor.fetchone()["id"]
+
+                    for c in collaborators:
+                        if not c.get("staff"):
+                            continue
+                        cursor.execute("""
+                            INSERT INTO order_item_staff (order_item_id, staff_name, commission_amount)
+                            VALUES (%s, %s, %s)
+                        """, (order_item_id, c["staff"], float(c.get("commission", 0) or 0)))
                 conn.commit()
                 
         return f"""
