@@ -314,6 +314,7 @@ def admin_dashboard():
                     WHERE o.status = 'NORMAL' AND o.created_at LIKE %s
                       AND i.staff_name IS NOT NULL AND i.staff_name != ''
                       AND NOT EXISTS (SELECT 1 FROM order_item_staff os2 WHERE os2.order_item_id = i.id)
+                    GROUP BY i.staff_name
                 ) combined
                 GROUP BY staff_name
                 ORDER BY total_commission DESC
@@ -1630,6 +1631,7 @@ def get_staff_payroll(month_prefix):
                     WHERE o.status = 'NORMAL' AND o.created_at LIKE %s
                       AND i.staff_name IS NOT NULL AND i.staff_name != ''
                       AND NOT EXISTS (SELECT 1 FROM order_item_staff os2 WHERE os2.order_item_id = i.id)
+                    GROUP BY i.staff_name
                 ) combined
                 GROUP BY staff_name
                 ORDER BY total_commission DESC
