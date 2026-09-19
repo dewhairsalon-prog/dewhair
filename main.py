@@ -4,12 +4,13 @@ import psycopg2
 import psycopg2.extras
 import hmac
 import json
+import io
 import urllib.parse
 from datetime import datetime, timedelta
 from pytz import timezone
 from functools import wraps
 from flask import (
-    Flask, request, redirect, url_for, session, render_template_string, jsonify
+    Flask, request, redirect, url_for, session, render_template_string, jsonify, send_file
 )
 
 app = Flask(__name__)
@@ -62,6 +63,16 @@ def init_db():
             # 兼容旧库：补上佣金方式与佣金数值字段
             cursor.execute("ALTER TABLE stylists ADD COLUMN IF NOT EXISTS commission_type TEXT DEFAULT 'percent'")
             cursor.execute("ALTER TABLE stylists ADD COLUMN IF NOT EXISTS commission_value DOUBLE PRECISION DEFAULT 0.0")
+            cursor.execute("ALTER TABLE stylists ADD COLUMN IF NOT EXISTS rank_name TEXT DEFAULT ''")
+            cursor.execute("ALTER TABLE services ADD COLUMN IF NOT EXISTS stock_qty INTEGER")
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS staff_ranks (
+                    id SERIAL PRIMARY KEY,
+                    name TEXT UNIQUE NOT NULL,
+                    commission_type TEXT DEFAULT 'percent',
+                    commission_value DOUBLE PRECISION DEFAULT 0.0
+                );
+            """)
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS customers (
                     id SERIAL PRIMARY KEY,
@@ -158,6 +169,16 @@ def init_db():
                 ]
                 for st in sample_stylists:
                     cursor.execute("INSERT INTO stylists (name, title) VALUES (%s, %s)", st)
+
+            cursor.execute("SELECT COUNT(*) FROM staff_ranks")
+            if cursor.fetchone()["count"] == 0:
+                default_ranks = [
+                    ("总监", "percent", 30.0),
+                    ("资深设计师", "percent", 20.0),
+                    ("初级/助理", "percent", 10.0),
+                ]
+                for r in default_ranks:
+                    cursor.execute("INSERT INTO staff_ranks (name, commission_type, commission_value) VALUES (%s, %s, %s)", r)
         conn.commit()
 
 init_db()
@@ -176,6 +197,20 @@ def get_setting(key, default):
             cursor.execute("SELECT value FROM settings WHERE key = %s", (key,))
             row = cursor.fetchone()
             return row["value"] if row else default
+
+def find_conflicting_appointment(cursor, stylist, start_str, end_str, exclude_id=None):
+    """检查某发型师在这个时间段是否已经有其他预约（时间区间重叠即视为冲突）"""
+    query = """
+        SELECT id FROM appointments
+        WHERE stylist = %s AND status = 'CONFIRMED'
+          AND start_time < %s AND end_time > %s
+    """
+    params = [stylist, end_str, start_str]
+    if exclude_id:
+        query += " AND id != %s"
+        params.append(exclude_id)
+    cursor.execute(query, params)
+    return cursor.fetchone()
 
 LAYOUT_TEMPLATE = """
 <!DOCTYPE html>
@@ -198,6 +233,7 @@ LAYOUT_TEMPLATE = """
                 <a href="/admin" class="hover:bg-indigo-700 px-2 py-1 rounded">营业、项目与员工</a>
                 <a href="/admin/staff" class="hover:bg-indigo-700 px-2 py-1 rounded">员工与佣金管理</a>
                 <a href="/admin/reports" class="hover:bg-indigo-700 px-2 py-1 rounded">90天报表</a>
+                <a href="/admin/payroll" class="hover:bg-indigo-700 px-2 py-1 rounded">薪资报表</a>
                 <a href="/" target="_blank" class="bg-green-600 px-2 py-1 rounded hover:bg-green-700">🔗 顾客预约页面</a>
                 <a href="/admin/logout" class="bg-red-500 px-2 py-1 rounded hover:bg-red-600">退出</a>
             </div>
@@ -391,14 +427,24 @@ def admin_dashboard():
                 <div class="bg-white p-6 rounded shadow">
                     <h2 class="text-xl font-bold mb-4">项目与充值套餐管理</h2>
                     <table class="w-full text-left">
-                        <thead><tr class="border-b"><th class="p-2">分类</th><th class="p-2">名称</th><th class="p-2">售价 (RM)</th><th class="p-2">获得 Credit (RM)</th><th class="p-2">操作</th></tr></thead>
+                        <thead><tr class="border-b"><th class="p-2">分类</th><th class="p-2">名称</th><th class="p-2">售价 (RM)</th><th class="p-2">获得 Credit (RM)</th><th class="p-2">库存</th><th class="p-2">操作</th></tr></thead>
                         <tbody>
                             {% for item in services %}
-                            <tr class="border-b">
+                            <tr class="border-b {% if item.category_type == 'Products' and item.stock_qty is not none and item.stock_qty <= 5 %}bg-orange-50{% endif %}">
                                 <td class="p-2 font-bold text-indigo-600">{{ item.category_type }}</td>
                                 <td class="p-2">{{ item.name }}</td>
                                 <td class="p-2 font-bold text-red-600">RM {{ "%.2f"|format(item.price) }}</td>
                                 <td class="p-2 font-bold text-green-600">{% if item.category_type == 'Packages' %}RM {{ "%.2f"|format(item.credit_value) }}{% else %}-{% endif %}</td>
+                                <td class="p-2">
+                                    {% if item.category_type == 'Products' %}
+                                        <span class="font-bold {% if item.stock_qty is none or item.stock_qty <= 5 %}text-orange-600{% else %}text-gray-700{% endif %}">{{ item.stock_qty if item.stock_qty is not none else 0 }}</span>
+                                        {% if item.stock_qty is not none and item.stock_qty <= 5 %}<span class="text-[10px] text-orange-600 font-bold">库存紧张</span>{% endif %}
+                                        <form action="/admin/service/restock/{{ item.id }}" method="POST" class="inline-flex gap-1 mt-1">
+                                            <input type="number" name="delta" placeholder="+数量" class="border rounded p-1 w-16 text-xs" required>
+                                            <button class="bg-green-600 text-white px-2 py-1 rounded text-[10px] font-bold hover:bg-green-700">补货</button>
+                                        </form>
+                                    {% else %}-{% endif %}
+                                </td>
                                 <td class="p-2">
                                     <a href="/admin/service/delete/{{ item.id }}" onclick="return confirm('确定要删除吗？')" class="text-red-500 text-sm font-bold">删除</a>
                                 </td>
@@ -449,8 +495,12 @@ def admin_dashboard():
                             <label class="block text-sm font-medium text-green-600 font-bold">赠送 Credit (RM)</label>
                             <input type="number" step="0.01" name="credit_value" class="w-full border rounded p-2" placeholder="例如: 1200">
                         </div>
+                        <div class="mb-3" id="stock_qty_div" style="display:none;">
+                            <label class="block text-sm font-medium text-orange-600 font-bold">初始库存数量</label>
+                            <input type="number" name="stock_qty" class="w-full border rounded p-2" placeholder="例如: 20">
+                        </div>
                         <div class="mb-4">
-                            <label class="block text-sm font-medium">耗时 (分钟)</label>
+                            <label class="block text-sm font-medium">耗时 (分钟，零售产品可填0)</label>
                             <input type="number" name="duration" class="w-full border rounded p-2" value="30" required>
                         </div>
                         <button class="w-full bg-indigo-600 text-white font-bold py-2 rounded hover:bg-indigo-700">确认添加服务</button>
@@ -460,8 +510,8 @@ def admin_dashboard():
         </div>
         <script>
             function toggleCreditInput(sel) {
-                const div = document.getElementById('credit_value_div');
-                div.style.display = (sel.value === 'Packages') ? 'block' : 'none';
+                document.getElementById('credit_value_div').style.display = (sel.value === 'Packages') ? 'block' : 'none';
+                document.getElementById('stock_qty_div').style.display = (sel.value === 'Products') ? 'block' : 'none';
             }
         </script>
     """), services=services, stylists=stylists, holidays=holidays, open_time=open_time, close_time=close_time, closed_wd=closed_wd, current_month=current_month_prefix, staff_performance=staff_performance)
@@ -471,15 +521,16 @@ def admin_dashboard():
 def add_stylist():
     name = request.form.get("name")
     title = request.form.get("title")
+    rank_name = request.form.get("rank_name", "")
     commission_type = request.form.get("commission_type", "percent")
     commission_value = float(request.form.get("commission_value", 0) or 0)
     with get_db() as conn:
         with conn.cursor() as cursor:
             try:
                 cursor.execute("""
-                    INSERT INTO stylists (name, title, commission_type, commission_value)
-                    VALUES (%s, %s, %s, %s)
-                """, (name, title, commission_type, commission_value))
+                    INSERT INTO stylists (name, title, rank_name, commission_type, commission_value)
+                    VALUES (%s, %s, %s, %s, %s)
+                """, (name, title, rank_name, commission_type, commission_value))
                 conn.commit()
             except:
                 conn.rollback()
@@ -499,49 +550,103 @@ def delete_stylist(id):
 
 STAFF_MANAGEMENT_TEMPLATE = """
     <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
-        <div class="md:col-span-2 bg-white p-6 rounded shadow">
-            <h2 class="text-xl font-bold mb-4 text-indigo-600">👥 员工与佣金管理</h2>
-            <table class="w-full text-left border-collapse">
-                <thead>
-                    <tr class="border-b bg-gray-50 text-sm">
-                        <th class="p-2">姓名</th>
-                        <th class="p-2">职级/头衔</th>
-                        <th class="p-2">提成方式</th>
-                        <th class="p-2">提成数值</th>
-                        <th class="p-2">操作</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {% for st in stylists %}
-                    <tr class="border-b" id="row-{{ st.id }}">
-                        <form action="/admin/staff/update/{{ st.id }}" method="POST" class="contents">
-                        <td class="p-2">
-                            <input type="text" name="name" value="{{ st.name }}" class="border rounded p-1.5 w-full font-bold text-indigo-600" required>
-                        </td>
-                        <td class="p-2">
-                            <input type="text" name="title" value="{{ st.title }}" class="border rounded p-1.5 w-full" required>
-                        </td>
-                        <td class="p-2">
-                            <select name="commission_type" class="border rounded p-1.5">
-                                <option value="percent" {% if st.commission_type == 'percent' %}selected{% endif %}>按百分比 (%)</option>
-                                <option value="fixed" {% if st.commission_type == 'fixed' %}selected{% endif %}>固定金额 (RM)</option>
-                            </select>
-                        </td>
-                        <td class="p-2">
-                            <input type="number" step="0.01" name="commission_value" value="{{ st.commission_value }}" class="border rounded p-1.5 w-24">
-                        </td>
-                        <td class="p-2 flex gap-2 items-center">
-                            <button class="bg-indigo-600 text-white px-3 py-1 rounded text-xs font-bold hover:bg-indigo-700">保存</button>
-                        </form>
-                            <a href="/admin/stylist/delete/{{ st.id }}" onclick="return confirm('确定要删除该员工吗？')" class="text-red-500 text-xs font-bold">删除</a>
-                        </td>
-                    </tr>
-                    {% else %}
-                    <tr><td colspan="5" class="p-3 text-gray-400">暂无员工，请在右侧添加</td></tr>
-                    {% endfor %}
-                </tbody>
-            </table>
-            <p class="text-xs text-gray-500 mt-3">💡 提成方式说明：选择「按百分比」时，员工做该项目会按售价的百分比自动计算建议佣金；选择「固定金额」则每次固定建议这个金额，两种方式都可以在 POS 收银时临时手动调整具体金额。</p>
+        <div class="md:col-span-2 space-y-6">
+            <!-- 职级预设：总监/资深/初级等不同比例 -->
+            <div class="bg-white p-6 rounded shadow">
+                <h2 class="text-xl font-bold mb-1 text-indigo-600">🎖️ 职级提成预设</h2>
+                <p class="text-xs text-gray-500 mb-4">设定好每个职级的默认提成比例，添加/编辑员工时选职级即可一键带入，仍可单独为某个员工微调。</p>
+                <table class="w-full text-left border-collapse mb-4">
+                    <thead><tr class="border-b bg-gray-50 text-sm"><th class="p-2">职级名称</th><th class="p-2">提成方式</th><th class="p-2">提成数值</th><th class="p-2">操作</th></tr></thead>
+                    <tbody>
+                        {% for r in ranks %}
+                        <tr class="border-b">
+                            <form action="/admin/ranks/update/{{ r.id }}" method="POST" class="contents">
+                            <td class="p-2"><input type="text" name="name" value="{{ r.name }}" class="border rounded p-1.5 w-full font-bold" required></td>
+                            <td class="p-2">
+                                <select name="commission_type" class="border rounded p-1.5">
+                                    <option value="percent" {% if r.commission_type == 'percent' %}selected{% endif %}>按百分比 (%)</option>
+                                    <option value="fixed" {% if r.commission_type == 'fixed' %}selected{% endif %}>固定金额 (RM)</option>
+                                </select>
+                            </td>
+                            <td class="p-2"><input type="number" step="0.01" name="commission_value" value="{{ r.commission_value }}" class="border rounded p-1.5 w-24"></td>
+                            <td class="p-2 flex gap-2 items-center">
+                                <button class="bg-indigo-600 text-white px-3 py-1 rounded text-xs font-bold hover:bg-indigo-700">保存</button>
+                            </form>
+                                <a href="/admin/ranks/delete/{{ r.id }}" onclick="return confirm('确定删除该职级吗？已使用该职级的员工不会被删除，只是失去预设标签。')" class="text-red-500 text-xs font-bold">删除</a>
+                            </td>
+                        </tr>
+                        {% else %}
+                        <tr><td colspan="4" class="p-3 text-gray-400">暂无职级预设</td></tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+                <form action="/admin/ranks/add" method="POST" class="flex gap-2 items-end">
+                    <div class="flex-grow">
+                        <label class="block text-xs font-medium text-gray-600">新职级名称</label>
+                        <input type="text" name="name" class="border rounded p-2 w-full text-sm" required placeholder="如: 总监">
+                    </div>
+                    <select name="commission_type" class="border rounded p-2 text-sm">
+                        <option value="percent">按百分比 (%)</option>
+                        <option value="fixed">固定金额 (RM)</option>
+                    </select>
+                    <input type="number" step="0.01" name="commission_value" class="border rounded p-2 text-sm w-24" value="0" placeholder="数值">
+                    <button class="bg-indigo-600 text-white px-4 py-2 rounded text-sm font-bold hover:bg-indigo-700">添加职级</button>
+                </form>
+            </div>
+
+            <div class="bg-white p-6 rounded shadow">
+                <h2 class="text-xl font-bold mb-4 text-indigo-600">👥 员工列表</h2>
+                <table class="w-full text-left border-collapse">
+                    <thead>
+                        <tr class="border-b bg-gray-50 text-sm">
+                            <th class="p-2">姓名</th>
+                            <th class="p-2">职级/头衔</th>
+                            <th class="p-2">所属职级预设</th>
+                            <th class="p-2">提成方式</th>
+                            <th class="p-2">提成数值</th>
+                            <th class="p-2">操作</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for st in stylists %}
+                        <tr class="border-b" id="row-{{ st.id }}">
+                            <form action="/admin/staff/update/{{ st.id }}" method="POST" class="contents" onsubmit="return true;">
+                            <td class="p-2">
+                                <input type="text" name="name" value="{{ st.name }}" class="border rounded p-1.5 w-full font-bold text-indigo-600" required>
+                            </td>
+                            <td class="p-2">
+                                <input type="text" name="title" value="{{ st.title }}" class="border rounded p-1.5 w-full" required>
+                            </td>
+                            <td class="p-2">
+                                <select name="rank_name" class="border rounded p-1.5" onchange="applyRankPreset(this)">
+                                    <option value="">-- 不挂职级 --</option>
+                                    {% for r in ranks %}
+                                    <option value="{{ r.name }}" data-type="{{ r.commission_type }}" data-value="{{ r.commission_value }}" {% if st.rank_name == r.name %}selected{% endif %}>{{ r.name }}</option>
+                                    {% endfor %}
+                                </select>
+                            </td>
+                            <td class="p-2">
+                                <select name="commission_type" class="border rounded p-1.5 commission-type-select">
+                                    <option value="percent" {% if st.commission_type == 'percent' %}selected{% endif %}>按百分比 (%)</option>
+                                    <option value="fixed" {% if st.commission_type == 'fixed' %}selected{% endif %}>固定金额 (RM)</option>
+                                </select>
+                            </td>
+                            <td class="p-2">
+                                <input type="number" step="0.01" name="commission_value" value="{{ st.commission_value }}" class="border rounded p-1.5 w-24 commission-value-input">
+                            </td>
+                            <td class="p-2 flex gap-2 items-center">
+                                <button class="bg-indigo-600 text-white px-3 py-1 rounded text-xs font-bold hover:bg-indigo-700">保存</button>
+                            </form>
+                                <a href="/admin/stylist/delete/{{ st.id }}" onclick="return confirm('确定要删除该员工吗？')" class="text-red-500 text-xs font-bold">删除</a>
+                            </td>
+                        </tr>
+                        {% else %}
+                        <tr><td colspan="6" class="p-3 text-gray-400">暂无员工，请在右侧添加</td></tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+                <p class="text-xs text-gray-500 mt-3">💡 选好「所属职级预设」会自动带入该职级的提成设置，你也可以在后面两栏手动改成这个员工专属的数值。POS 收银时会按这里最终保存的数值计算建议佣金。</p>
+            </div>
         </div>
 
         <div class="bg-white p-6 rounded shadow h-fit">
@@ -552,24 +657,48 @@ STAFF_MANAGEMENT_TEMPLATE = """
                     <input type="text" name="name" class="w-full border rounded p-2" required placeholder="如: Kevin">
                 </div>
                 <div class="mb-3">
-                    <label class="block text-sm font-medium">职级 / 简介</label>
+                    <label class="block text-sm font-medium">职级 / 简介（自由文字）</label>
                     <input type="text" name="title" class="w-full border rounded p-2" required placeholder="如: 高级造型师">
                 </div>
                 <div class="mb-3">
+                    <label class="block text-sm font-medium">所属职级预设（可选，自动带入提成）</label>
+                    <select name="rank_name" class="w-full border rounded p-2" onchange="applyRankPresetAdd(this)">
+                        <option value="">-- 不挂职级，手动设置 --</option>
+                        {% for r in ranks %}
+                        <option value="{{ r.name }}" data-type="{{ r.commission_type }}" data-value="{{ r.commission_value }}">{{ r.name }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div class="mb-3">
                     <label class="block text-sm font-medium">提成方式</label>
-                    <select name="commission_type" class="w-full border rounded p-2">
+                    <select name="commission_type" id="add_commission_type" class="w-full border rounded p-2">
                         <option value="percent">按百分比 (%)</option>
                         <option value="fixed">固定金额 (RM)</option>
                     </select>
                 </div>
                 <div class="mb-4">
                     <label class="block text-sm font-medium">提成数值</label>
-                    <input type="number" step="0.01" name="commission_value" class="w-full border rounded p-2" value="0" placeholder="例如: 20 (代表20%) 或 15 (代表RM15)">
+                    <input type="number" step="0.01" name="commission_value" id="add_commission_value" class="w-full border rounded p-2" value="0" placeholder="例如: 20 (代表20%) 或 15 (代表RM15)">
                 </div>
                 <button class="w-full bg-indigo-600 text-white font-bold py-2 rounded hover:bg-indigo-700">确认添加员工</button>
             </form>
         </div>
     </div>
+    <script>
+        function applyRankPreset(sel) {
+            const opt = sel.options[sel.selectedIndex];
+            if (!opt.value) return;
+            const row = sel.closest('tr');
+            row.querySelector('.commission-type-select').value = opt.getAttribute('data-type');
+            row.querySelector('.commission-value-input').value = opt.getAttribute('data-value');
+        }
+        function applyRankPresetAdd(sel) {
+            const opt = sel.options[sel.selectedIndex];
+            if (!opt.value) return;
+            document.getElementById('add_commission_type').value = opt.getAttribute('data-type');
+            document.getElementById('add_commission_value').value = opt.getAttribute('data-value');
+        }
+    </script>
 """
 
 @app.route("/admin/staff")
@@ -579,21 +708,69 @@ def admin_staff():
         with conn.cursor() as cursor:
             cursor.execute("SELECT * FROM stylists ORDER BY id DESC")
             stylists = cursor.fetchall()
-    return render_template_string(LAYOUT_TEMPLATE.replace("{% block content %}{% endblock %}", STAFF_MANAGEMENT_TEMPLATE), stylists=stylists)
+            cursor.execute("SELECT * FROM staff_ranks ORDER BY commission_value DESC")
+            ranks = cursor.fetchall()
+    return render_template_string(LAYOUT_TEMPLATE.replace("{% block content %}{% endblock %}", STAFF_MANAGEMENT_TEMPLATE), stylists=stylists, ranks=ranks)
 
 @app.route("/admin/staff/update/<int:id>", methods=["POST"])
 @admin_required
 def admin_staff_update(id):
     name = request.form.get("name")
     title = request.form.get("title")
+    rank_name = request.form.get("rank_name", "")
     commission_type = request.form.get("commission_type", "percent")
     commission_value = float(request.form.get("commission_value", 0) or 0)
     with get_db() as conn:
         with conn.cursor() as cursor:
             cursor.execute("""
-                UPDATE stylists SET name = %s, title = %s, commission_type = %s, commission_value = %s
+                UPDATE stylists SET name = %s, title = %s, rank_name = %s, commission_type = %s, commission_value = %s
                 WHERE id = %s
-            """, (name, title, commission_type, commission_value, id))
+            """, (name, title, rank_name, commission_type, commission_value, id))
+            conn.commit()
+    return redirect(url_for("admin_staff"))
+
+@app.route("/admin/ranks/add", methods=["POST"])
+@admin_required
+def admin_ranks_add():
+    name = request.form.get("name")
+    commission_type = request.form.get("commission_type", "percent")
+    commission_value = float(request.form.get("commission_value", 0) or 0)
+    with get_db() as conn:
+        with conn.cursor() as cursor:
+            try:
+                cursor.execute("""
+                    INSERT INTO staff_ranks (name, commission_type, commission_value) VALUES (%s, %s, %s)
+                """, (name, commission_type, commission_value))
+                conn.commit()
+            except:
+                conn.rollback()
+    return redirect(url_for("admin_staff"))
+
+@app.route("/admin/ranks/update/<int:id>", methods=["POST"])
+@admin_required
+def admin_ranks_update(id):
+    name = request.form.get("name")
+    commission_type = request.form.get("commission_type", "percent")
+    commission_value = float(request.form.get("commission_value", 0) or 0)
+    with get_db() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT name FROM staff_ranks WHERE id = %s", (id,))
+            old = cursor.fetchone()
+            cursor.execute("""
+                UPDATE staff_ranks SET name = %s, commission_type = %s, commission_value = %s WHERE id = %s
+            """, (name, commission_type, commission_value, id))
+            # 同步更新已经挂了这个职级名字的员工的显示名（提成数值本身不会被联动覆盖，员工需要重新保存才会应用新数值）
+            if old and old["name"] != name:
+                cursor.execute("UPDATE stylists SET rank_name = %s WHERE rank_name = %s", (name, old["name"]))
+            conn.commit()
+    return redirect(url_for("admin_staff"))
+
+@app.route("/admin/ranks/delete/<int:id>")
+@admin_required
+def admin_ranks_delete(id):
+    with get_db() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute("DELETE FROM staff_ranks WHERE id = %s", (id,))
             conn.commit()
     return redirect(url_for("admin_staff"))
 
@@ -642,12 +819,27 @@ def add_service():
     price = float(request.form.get("price", 0))
     duration = int(request.form.get("duration", 30))
     credit_value = float(request.form.get("credit_value", 0)) if cat == 'Packages' else 0.0
+    stock_qty = int(request.form.get("stock_qty") or 0) if cat == 'Products' else None
     with get_db() as conn:
         with conn.cursor() as cursor:
             cursor.execute("""
-                INSERT INTO services (name, category_type, sub_category, price, duration, credit_value) 
-                VALUES (%s, %s, %s, %s, %s, %s)
-            """, (name, cat, cat, price, duration, credit_value))
+                INSERT INTO services (name, category_type, sub_category, price, duration, credit_value, stock_qty) 
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+            """, (name, cat, cat, price, duration, credit_value, stock_qty))
+            conn.commit()
+    return redirect(url_for("admin_dashboard"))
+
+@app.route("/admin/service/restock/<int:id>", methods=["POST"])
+@admin_required
+def admin_service_restock(id):
+    delta = int(request.form.get("delta", 0) or 0)
+    with get_db() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT stock_qty FROM services WHERE id = %s", (id,))
+            row = cursor.fetchone()
+            current = row["stock_qty"] if row and row["stock_qty"] is not None else 0
+            new_qty = max(0, current + delta)
+            cursor.execute("UPDATE services SET stock_qty = %s WHERE id = %s", (new_qty, id))
             conn.commit()
     return redirect(url_for("admin_dashboard"))
 
@@ -862,12 +1054,16 @@ ADMIN_APPOINTMENTS_TEMPLATE = """
                 <a href="/admin" class="hover:bg-indigo-700 px-2 py-1 rounded">营业、项目与员工</a>
                 <a href="/admin/staff" class="hover:bg-indigo-700 px-2 py-1 rounded">员工与佣金管理</a>
                 <a href="/admin/reports" class="hover:bg-indigo-700 px-2 py-1 rounded">90天报表</a>
+                <a href="/admin/payroll" class="hover:bg-indigo-700 px-2 py-1 rounded">薪资报表</a>
                 <a href="/" target="_blank" class="bg-green-600 px-2 py-1 rounded hover:bg-green-700">🔗 顾客预约页面</a>
                 <a href="/admin/logout" class="bg-red-500 px-2 py-1 rounded hover:bg-red-600">退出</a>
             </div>
         </div>
     </nav>
     <main class="container mx-auto p-6">
+        {% if error %}
+        <div class="mb-4 p-3 bg-red-100 text-red-700 rounded-lg text-sm font-bold border border-red-300">⚠️ {{ error }}</div>
+        {% endif %}
         <div class="bg-white p-6 rounded-xl shadow-md mb-6">
             <div class="flex flex-col md:flex-row justify-between items-start md:items-center mb-6 gap-4 border-b pb-4">
                 <h2 class="text-xl font-extrabold text-indigo-600">预约记录与时间轴管理</h2>
@@ -1068,7 +1264,7 @@ def admin_appointments():
         timeslots.append(st.strftime("%H:%M"))
         st += timedelta(minutes=30)
         
-    return render_template_string(ADMIN_APPOINTMENTS_TEMPLATE, appointments=appointments, date_strip=date_strip, selected_date=selected_date, today_str=today_str, services=services, stylists=stylists, customers=customers, timeslots=timeslots)
+    return render_template_string(ADMIN_APPOINTMENTS_TEMPLATE, appointments=appointments, date_strip=date_strip, selected_date=selected_date, today_str=today_str, services=services, stylists=stylists, customers=customers, timeslots=timeslots, error=request.args.get("error"))
 
 @app.route("/admin/appointment/add", methods=["POST"])
 @admin_required
@@ -1089,6 +1285,9 @@ def admin_add_appointment():
             end_dt = start_dt + timedelta(minutes=duration)
             start_str = start_dt.strftime("%Y-%m-%d %H:%M")
             end_str = end_dt.strftime("%Y-%m-%d %H:%M")
+
+            if find_conflicting_appointment(cursor, stylist, start_str, end_str):
+                return redirect(url_for("admin_appointments", date=b_date, error="该发型师这个时间段已经有预约了，请换个时间或发型师！"))
             
             cursor.execute("SELECT id FROM customers WHERE phone = %s", (c_phone,))
             cust = cursor.fetchone()
@@ -1338,10 +1537,13 @@ def void_order(id):
             current_credits = cust["credits"] if cust else 0.0
             
             for item in items:
-                cursor.execute("SELECT credit_value FROM services WHERE name = %s", (item["item_name"],))
+                cursor.execute("SELECT credit_value, category_type, stock_qty FROM services WHERE name = %s", (item["item_name"],))
                 srv = cursor.fetchone()
                 if srv and srv["credit_value"] > 0:
                     current_credits -= srv["credit_value"]
+                # 作废订单时把之前扣掉的零售产品库存补回去
+                if srv and srv["category_type"] == "Products" and srv["stock_qty"] is not None:
+                    cursor.execute("UPDATE services SET stock_qty = stock_qty + 1 WHERE name = %s", (item["item_name"],))
             
             if payment == "Credit Balance Deduct":
                 current_credits += total
@@ -1400,6 +1602,166 @@ def admin_reports():
         </div>
     """), days_data=days_data)
 
+def get_staff_payroll(month_prefix):
+    """按月汇总每位员工的销售额与佣金（新版协作记录 + 兼容更新前的旧版单员工记录）"""
+    with get_db() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute("""
+                SELECT staff_name, SUM(item_count) as item_count, SUM(total_sales) as total_sales, SUM(total_commission) as total_commission
+                FROM (
+                    SELECT os.staff_name as staff_name,
+                           COUNT(os.id) as item_count,
+                           SUM(i.price) as total_sales,
+                           SUM(os.commission_amount) as total_commission
+                    FROM order_item_staff os
+                    JOIN order_items i ON os.order_item_id = i.id
+                    JOIN orders o ON i.order_id = o.id
+                    WHERE o.status = 'NORMAL' AND o.created_at LIKE %s
+                    GROUP BY os.staff_name
+
+                    UNION ALL
+
+                    SELECT i.staff_name as staff_name,
+                           COUNT(i.id) as item_count,
+                           SUM(i.price) as total_sales,
+                           SUM(i.commission) as total_commission
+                    FROM order_items i
+                    JOIN orders o ON i.order_id = o.id
+                    WHERE o.status = 'NORMAL' AND o.created_at LIKE %s
+                      AND i.staff_name IS NOT NULL AND i.staff_name != ''
+                      AND NOT EXISTS (SELECT 1 FROM order_item_staff os2 WHERE os2.order_item_id = i.id)
+                ) combined
+                GROUP BY staff_name
+                ORDER BY total_commission DESC
+            """, (f"{month_prefix}%", f"{month_prefix}%"))
+            return cursor.fetchall()
+
+PAYROLL_TEMPLATE = """
+    <div class="bg-white p-6 rounded shadow space-y-4">
+        <div class="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
+            <h2 class="text-xl font-bold text-indigo-600">💰 月结员工薪资 / 佣金报表</h2>
+            <form action="/admin/payroll" method="GET" class="flex gap-2 items-center">
+                <input type="month" name="month" value="{{ month }}" class="border rounded px-3 py-1.5 text-sm">
+                <button class="bg-indigo-600 text-white px-3 py-1.5 rounded text-sm font-bold">查看</button>
+            </form>
+        </div>
+
+        <table class="w-full text-left border-collapse">
+            <thead>
+                <tr class="border-b bg-gray-50 text-sm">
+                    <th class="p-2">员工姓名</th>
+                    <th class="p-2">服务项目数</th>
+                    <th class="p-2">总销售额 (RM)</th>
+                    <th class="p-2 text-green-700">应发佣金 (RM)</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for sp in payroll %}
+                <tr class="border-b">
+                    <td class="p-2 font-bold">{{ sp.staff_name }}</td>
+                    <td class="p-2">{{ sp.item_count }}</td>
+                    <td class="p-2 font-bold">RM {{ "%.2f"|format(sp.total_sales) }}</td>
+                    <td class="p-2 font-bold text-green-600">RM {{ "%.2f"|format(sp.total_commission) }}</td>
+                </tr>
+                {% else %}
+                <tr><td colspan="4" class="p-3 text-gray-400">该月暂无佣金记录</td></tr>
+                {% endfor %}
+            </tbody>
+            {% if payroll %}
+            <tfoot>
+                <tr class="border-t-2 font-bold bg-gray-50">
+                    <td class="p-2">合计</td>
+                    <td class="p-2">{{ payroll|sum(attribute='item_count') }}</td>
+                    <td class="p-2">RM {{ "%.2f"|format(payroll|sum(attribute='total_sales')) }}</td>
+                    <td class="p-2 text-green-700">RM {{ "%.2f"|format(payroll|sum(attribute='total_commission')) }}</td>
+                </tr>
+            </tfoot>
+            {% endif %}
+        </table>
+
+        <div class="flex gap-2">
+            <a href="/admin/payroll/export?month={{ month }}" class="bg-green-600 text-white px-4 py-2 rounded text-sm font-bold hover:bg-green-700">📥 导出 Excel</a>
+            <a href="/admin/payroll/print?month={{ month }}" target="_blank" class="bg-indigo-600 text-white px-4 py-2 rounded text-sm font-bold hover:bg-indigo-700">🖨️ 打印 / 另存为 PDF</a>
+        </div>
+    </div>
+"""
+
+@app.route("/admin/payroll")
+@admin_required
+def admin_payroll():
+    month = request.args.get("month") or datetime.now(MY_TZ).strftime("%Y-%m")
+    payroll = get_staff_payroll(month)
+    return render_template_string(LAYOUT_TEMPLATE.replace("{% block content %}{% endblock %}", PAYROLL_TEMPLATE), payroll=payroll, month=month)
+
+@app.route("/admin/payroll/export")
+@admin_required
+def admin_payroll_export():
+    month = request.args.get("month") or datetime.now(MY_TZ).strftime("%Y-%m")
+    payroll = get_staff_payroll(month)
+    try:
+        from openpyxl import Workbook
+    except ImportError:
+        return "导出 Excel 需要先在 requirements.txt 里加上 openpyxl 这个库，重新部署后再试一次。", 500
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = f"{month} 薪资报表"
+    ws.append(["员工姓名", "服务项目数", "总销售额 (RM)", "应发佣金 (RM)"])
+    total_items, total_sales, total_commission = 0, 0.0, 0.0
+    for sp in payroll:
+        ws.append([sp["staff_name"], sp["item_count"], round(sp["total_sales"], 2), round(sp["total_commission"], 2)])
+        total_items += sp["item_count"]
+        total_sales += sp["total_sales"]
+        total_commission += sp["total_commission"]
+    ws.append(["合计", total_items, round(total_sales, 2), round(total_commission, 2)])
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return send_file(
+        buf,
+        as_attachment=True,
+        download_name=f"payroll_{month}.xlsx",
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+
+@app.route("/admin/payroll/print")
+@admin_required
+def admin_payroll_print():
+    month = request.args.get("month") or datetime.now(MY_TZ).strftime("%Y-%m")
+    payroll = get_staff_payroll(month)
+    return render_template_string("""
+        <div style="max-width:650px;margin:40px auto;padding:25px;border:1px solid #ccc;font-family:sans-serif;border-radius:8px;background:#fff;">
+            <h2 style="color:#4f46e5;">Dew Hair Salon - {{ month }} 员工薪资 / 佣金报表</h2>
+            <hr style="border:0;border-top:1px solid #eee;margin:15px 0;">
+            <table style="width:100%;border-collapse:collapse;font-size:14px;">
+                <thead>
+                    <tr style="border-bottom:1px solid #ddd;background:#f9fafb;">
+                        <th style="text-align:left;padding:8px;">员工姓名</th>
+                        <th style="text-align:right;padding:8px;">服务项目数</th>
+                        <th style="text-align:right;padding:8px;">总销售额 (RM)</th>
+                        <th style="text-align:right;padding:8px;">应发佣金 (RM)</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for sp in payroll %}
+                    <tr style="border-bottom:1px solid #eee;">
+                        <td style="padding:8px;">{{ sp.staff_name }}</td>
+                        <td style="text-align:right;padding:8px;">{{ sp.item_count }}</td>
+                        <td style="text-align:right;padding:8px;">RM {{ "%.2f"|format(sp.total_sales) }}</td>
+                        <td style="text-align:right;padding:8px;color:green;font-weight:bold;">RM {{ "%.2f"|format(sp.total_commission) }}</td>
+                    </tr>
+                    {% else %}
+                    <tr><td colspan="4" style="padding:8px;color:#999;">该月暂无佣金记录</td></tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            <div style="margin-top:20px;">
+                <button onclick="window.print()" style="padding:12px 20px;background:#10b981;color:white;border:none;border-radius:6px;font-weight:bold;cursor:pointer;">📥 打印 / 另存为 PDF</button>
+            </div>
+        </div>
+    """, payroll=payroll, month=month)
+
 @app.route("/admin/pos")
 @admin_required
 def admin_pos():
@@ -1425,6 +1787,11 @@ def admin_pos():
                         <div class="text-xs text-indigo-600 font-bold">{{ item.category_type }}</div>
                         <div class="font-bold text-lg">{{ item.name }}</div>
                         <div class="text-gray-600">RM {{ "%.2f"|format(item.price) }}</div>
+                        {% if item.category_type == 'Products' %}
+                            <div class="text-[11px] font-bold mt-1 {% if item.stock_qty is none or item.stock_qty <= 0 %}text-red-600{% elif item.stock_qty <= 5 %}text-orange-600{% else %}text-gray-400{% endif %}">
+                                库存: {{ item.stock_qty if item.stock_qty is not none else 0 }}{% if item.stock_qty is not none and item.stock_qty <= 0 %} (缺货){% endif %}
+                            </div>
+                        {% endif %}
                     </button>
                     {% endfor %}
                 </div>
@@ -1659,11 +2026,15 @@ def checkout():
                     current_credits = 0.0
                 
                 for item in cart_data:
-                    cursor.execute("SELECT credit_value FROM services WHERE name = %s", (item["name"],))
+                    cursor.execute("SELECT credit_value, category_type, stock_qty FROM services WHERE name = %s", (item["name"],))
                     srv = cursor.fetchone()
                     if srv and srv["credit_value"] > 0:
                         current_credits += srv["credit_value"]
                         cursor.execute("UPDATE customers SET credits = %s WHERE id = %s", (current_credits, cust_id))
+                    # 零售产品每卖出一件自动扣一次库存（库存不会扣成负数）
+                    if srv and srv["category_type"] == "Products" and srv["stock_qty"] is not None:
+                        new_stock = max(0, srv["stock_qty"] - 1)
+                        cursor.execute("UPDATE services SET stock_qty = %s WHERE name = %s", (new_stock, item["name"]))
 
                 if pay_method == "Credit Balance Deduct":
                     if current_credits < total: return "结算失败：该顾客 Credit 余额不足！", 400
@@ -1902,6 +2273,10 @@ def book_appointment():
             end_dt = start_dt + timedelta(minutes=duration)
             start_str = start_dt.strftime("%Y-%m-%d %H:%M")
             end_str = end_dt.strftime("%Y-%m-%d %H:%M")
+
+            # 检查该发型师这个时间段是否已被预约
+            if find_conflicting_appointment(cursor, stylist, start_str, end_str):
+                return redirect(url_for("index", date=b_date, error="该发型师这个时间段刚好已经有其他预约了，请换个时间或发型师！"))
             
             cursor.execute("SELECT id, token FROM customers WHERE phone = %s", (c_phone,))
             cust = cursor.fetchone()
