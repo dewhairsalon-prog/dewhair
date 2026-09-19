@@ -34,7 +34,6 @@ def get_db():
     if DATABASE_URL:
         conn = psycopg2.connect(DATABASE_URL, cursor_factory=psycopg2.extras.RealDictCursor)
     else:
-        # 如果没有配置 DATABASE_URL，默认回退到本地的测试连接串（可根据需要修改）
         conn = psycopg2.connect("dbname=salon user=postgres password=postgres", cursor_factory=psycopg2.extras.RealDictCursor)
     return conn
 
@@ -1552,14 +1551,15 @@ BOOKING_CALENDAR_TEMPLATE = """
             input.addEventListener('change', function() {
                 document.querySelectorAll('input[name="booking_time"]').forEach(i => {
                     i.parentElement.classList.remove('bg-indigo-600', 'text-white', 'border-indigo-600');
-                    i.parentElement.classList.add('bg-white', 'text-black');
+                    i.parentElement.classList.add('bg-white', 'text-gray-800');
                 });
                 if(this.checked) {
-                    this.parentElement.classList.remove('bg-white', 'text-black');
+                    this.parentElement.classList.remove('bg-white', 'text-gray-800');
                     this.parentElement.classList.add('bg-indigo-600', 'text-white', 'border-indigo-600');
                 }
             });
         });
+
         function selectDateCard(dateStr) {
             document.getElementById('booking_date').value = dateStr;
             document.querySelectorAll('.date-card').forEach(card => {
@@ -1577,53 +1577,29 @@ BOOKING_CALENDAR_TEMPLATE = """
 </html>
 """
 
-@app.route("/book", methods=["GET", "POST"])
-def public_booking():
-    if request.method == "POST":
-        service_id = request.form.get("service_id")
-        stylist = request.form.get("stylist")
-        b_date = request.form.get("booking_date")
-        b_time = request.form.get("booking_time")
-        c_name = request.form.get("customer_name")
-        c_phone = request.form.get("customer_phone")
-        
-        with get_db() as conn:
-            with conn.cursor() as cursor:
-                cursor.execute("SELECT duration FROM services WHERE id = %s", (service_id,))
-                srv = cursor.fetchone()
-                duration = srv["duration"] if srv else 30
-                start_dt = datetime.strptime(f"{b_date} {b_time}", "%Y-%m-%d %H:%M")
-                end_dt = start_dt + timedelta(minutes=duration)
-                start_str = start_dt.strftime("%Y-%m-%d %H:%M")
-                end_str = end_dt.strftime("%Y-%m-%d %H:%M")
+@app.route("/", methods=["GET"])
+def index():
+    selected_date = request.args.get("date", get_current_date())
+    today_str = get_current_date()
+    date_strip = []
+    base_dt = datetime.strptime(selected_date, "%Y-%m-%d")
+    start_loop = base_dt - timedelta(days=2)
+    
+    with get_db() as conn:
+        with conn.cursor() as cursor:
+            for i in range(10):
+                d = start_loop + timedelta(days=i)
+                d_str = d.strftime("%Y-%m-%d")
+                wd_map = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+                wd_str = wd_map[d.weekday()]
+                if d_str == today_str: wd_str = "今天"
+                date_strip.append({"date_str": d_str, "display_date": d.strftime("%m-%d"), "year": d.strftime("%Y"), "weekday": wd_str})
                 
-                cursor.execute("SELECT id, token FROM customers WHERE phone = %s", (c_phone,))
-                cust = cursor.fetchone()
-                if not cust:
-                    token = secrets.token_hex(8)
-                    cursor.execute("INSERT INTO customers (name, phone, token) VALUES (%s, %s, %s) RETURNING id", (c_name, c_phone, token))
-                    cust_token = token
-                    cust_id = cursor.fetchone()["id"]
-                else:
-                    cust_token = cust["token"]
-                    cust_id = cust["id"]
-                    
-                cursor.execute("INSERT INTO appointments (customer_id, service_id, stylist, start_time, end_time) VALUES (%s, %s, %s, %s, %s)", (cust_id, service_id, stylist, start_str, end_str))
-                conn.commit()
+            cursor.execute("SELECT * FROM services WHERE category_type != 'Packages'")
+            services = cursor.fetchall()
+            cursor.execute("SELECT * FROM stylists")
+            stylists = cursor.fetchall()
             
-        return f"""
-            <div style="max-width:400px;margin:50px auto;text-align:center;font-family:sans-serif;padding:30px;border:1px solid #ddd;border-radius:8px;background:#fff;">
-                <h2 style="color:green;margin-top:0;">预约成功！</h2>
-                <p>感谢您，<strong>{c_name}</strong>！您的预约已成功记录。</p>
-                <p><strong>时间：</strong>{start_str} ~ {end_str.split()[1]}</p>
-                <p><strong>发型师：</strong>{stylist}</p>
-                <hr style="margin:20px 0;">
-                <a href="/customer/{cust_token}" style="display:inline-block;padding:12px 20px;background:#4f46e5;color:white;text-decoration:none;border-radius:6px;font-weight:bold;">点此进入我的会员专属页 & 下载单据</a>
-            </div>
-        """
-    return public_booking_render(error=None)
-
-def public_booking_render(error=None):
     open_time_str = get_setting("open_time", "10:00")
     close_time_str = get_setting("close_time", "20:00")
     timeslots = []
@@ -1633,48 +1609,79 @@ def public_booking_render(error=None):
         timeslots.append(st.strftime("%H:%M"))
         st += timedelta(minutes=30)
         
+    error = request.args.get("error")
+    return render_template_string(BOOKING_CALENDAR_TEMPLATE, services=services, stylists=stylists, date_strip=date_strip, selected_date=selected_date, today_str=today_str, open_time=open_time_str, close_time=close_time_str, timeslots=timeslots, error=error)
+
+@app.route("/book", methods=["POST"])
+def book_appointment():
+    service_id = request.form.get("service_id")
+    stylist = request.form.get("stylist")
+    b_date = request.form.get("booking_date")
+    b_time = request.form.get("booking_time")
+    c_name = request.form.get("customer_name")
+    c_phone = request.form.get("customer_phone")
+    
     with get_db() as conn:
         with conn.cursor() as cursor:
-            cursor.execute("SELECT * FROM services WHERE category_type != 'Packages'")
-            services = cursor.fetchall()
-            cursor.execute("SELECT * FROM stylists")
-            stylists = cursor.fetchall()
-        
-    today_str = get_current_date()
-    selected_date = request.args.get("date", today_str)
-    date_strip = []
-    base_dt = datetime.now(MY_TZ)
-    wd_map = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
-    for i in range(14):
-        d = base_dt + timedelta(days=i)
-        d_str = d.strftime("%Y-%m-%d")
-        wd_str = "今天" if i == 0 else ("明天" if i == 1 else wd_map[d.weekday()])
-        date_strip.append({"date_str": d_str, "display_date": d.strftime("%m月%d日"), "weekday": wd_str, "year": d.strftime("%Y")})
-        
-    return render_template_string(BOOKING_CALENDAR_TEMPLATE, services=services, stylists=stylists, timeslots=timeslots, open_time=open_time_str, close_time=close_time_str, today_str=today_str, selected_date=selected_date, date_strip=date_strip, error=error)
+            # 校验休息日
+            cursor.execute("SELECT * FROM holidays WHERE date_str = %s", (b_date,))
+            if cursor.fetchone():
+                return redirect(url_for("index", date=b_date, error="该日期为临时闭店日，无法预约！"))
+            
+            dt_obj = datetime.strptime(b_date, "%Y-%m-%d")
+            closed_wd = get_setting("closed_weekdays", "1")
+            if closed_wd != '-1' and dt_obj.weekday() == int(closed_wd):
+                return redirect(url_for("index", date=b_date, error="该日期为门店固定休息日，无法预约！"))
+                
+            cursor.execute("SELECT duration FROM services WHERE id = %s", (service_id,))
+            srv = cursor.fetchone()
+            duration = srv["duration"] if srv else 30
+            
+            start_dt = datetime.strptime(f"{b_date} {b_time}", "%Y-%m-%d %H:%M")
+            end_dt = start_dt + timedelta(minutes=duration)
+            start_str = start_dt.strftime("%Y-%m-%d %H:%M")
+            end_str = end_dt.strftime("%Y-%m-%d %H:%M")
+            
+            cursor.execute("SELECT id, token FROM customers WHERE phone = %s", (c_phone,))
+            cust = cursor.fetchone()
+            if not cust:
+                token = secrets.token_hex(8)
+                cursor.execute("INSERT INTO customers (name, phone, token) VALUES (%s, %s, %s) RETURNING id, token", (c_name, c_phone, token))
+                res = cursor.fetchone()
+                cust_id = res["id"]
+                cust_token = res["token"]
+            else:
+                cust_id = cust["id"]
+                cust_token = cust["token"]
+                
+            cursor.execute("INSERT INTO appointments (customer_id, service_id, stylist, start_time, end_time) VALUES (%s, %s, %s, %s, %s) RETURNING id", (cust_id, service_id, stylist, start_str, end_str))
+            app_id = cursor.fetchone()["id"]
+            conn.commit()
+            
+    return redirect(url_for("customer_portal", token=cust_token))
 
 @app.route("/customer/<token>")
-def customer_profile(token):
+def customer_portal(token):
     with get_db() as conn:
         with conn.cursor() as cursor:
             cursor.execute("SELECT * FROM customers WHERE token = %s", (token,))
             cust = cursor.fetchone()
-            if not cust: return "Invalid customer link.", 404
+            if not cust: return "会员页面不存在或链接错误", 404
+            
+            cursor.execute("""
+                SELECT a.*, s.name as service_name, s.price FROM appointments a 
+                JOIN services s ON a.service_id = s.id 
+                WHERE a.customer_id = %s ORDER BY a.start_time DESC
+            """, (cust["id"],))
+            appointments = cursor.fetchall()
+            
             cursor.execute("""
                 SELECT o.*, i.item_name, i.price FROM orders o 
                 LEFT JOIN order_items i ON o.id = i.order_id 
-                WHERE o.customer_id = %s 
-                ORDER BY o.created_at DESC
+                WHERE o.customer_id = %s ORDER BY o.created_at DESC
             """, (cust["id"],))
             orders = cursor.fetchall()
-            cursor.execute("""
-                SELECT a.*, s.name as service_name FROM appointments a
-                JOIN services s ON a.service_id = s.id
-                WHERE a.customer_id = %s
-                ORDER BY a.start_time DESC
-            """, (cust["id"],))
-            appointments = cursor.fetchall()
-        
+            
     return render_template_string("""
         <!DOCTYPE html>
         <html lang="zh-CN">
@@ -1685,69 +1692,59 @@ def customer_profile(token):
             <script src="https://cdn.tailwindcss.com"></script>
         </head>
         <body class="bg-gray-50 min-h-screen p-4 md:p-8">
-            <div class="max-w-3xl mx-auto bg-white p-6 md:p-8 rounded-xl shadow-md space-y-6">
-                <div class="flex flex-col md:flex-row justify-between items-start md:items-center border-b pb-4 gap-4">
+            <div class="max-w-3xl mx-auto space-y-6">
+                <div class="bg-white p-6 rounded-xl shadow flex justify-between items-center">
                     <div>
-                        <h2 class="text-2xl font-extrabold text-indigo-600">🌟 欢迎光临, {{ cust.name }}!</h2>
-                        <p class="text-gray-500 text-sm mt-1">手机号码: {{ cust.phone }}</p>
+                        <h2 class="text-2xl font-bold text-indigo-600">✨ {{ cust.name }} 的专属会员中心</h2>
+                        <p class="text-sm text-gray-500">电话: {{ cust.phone }}</p>
                     </div>
-                    <div class="bg-green-50 border border-green-200 px-4 py-3 rounded-lg text-right">
-                        <div class="text-xs text-green-700 font-bold">账户储值 Credit 余额</div>
-                        <div class="text-2xl font-black text-green-600">RM {{ "%.2f"|format(cust.credits) }}</div>
+                    <div class="text-right">
+                        <div class="text-xs text-gray-400">账户 Credit 余额</div>
+                        <div class="text-2xl font-bold text-green-600">RM {{ "%.2f"|format(cust.credits) }}</div>
                     </div>
                 </div>
 
-                <div>
+                <div class="bg-white p-6 rounded-xl shadow">
                     <h3 class="text-lg font-bold mb-3 text-gray-800">📅 我的预约记录</h3>
-                    <div class="border rounded-lg overflow-x-auto">
-                        <table class="w-full text-left text-sm">
-                            <thead><tr class="bg-gray-50 border-b"><th class="p-3">时间段</th><th class="p-3">项目</th><th class="p-3">发型师</th><th class="p-3">状态</th></tr></thead>
-                            <tbody>
-                                {% for a in appointments %}
-                                <tr class="border-b">
-                                    <td class="p-3 font-semibold text-indigo-600">{{ a.start_time }} ~ {{ a.end_time.split()[1] }}</td>
-                                    <td class="p-3">{{ a.service_name }}</td>
-                                    <td class="p-3">{{ a.stylist }}</td>
-                                    <td class="p-3"><span class="bg-green-100 text-green-800 px-2 py-0.5 rounded text-xs font-bold">{{ a.status }}</span></td>
-                                </tr>
-                                {% else %}
-                                <tr><td colspan="4" class="p-4 text-center text-gray-400">暂无预约记录</td></tr>
-                                {% endfor %}
-                            </tbody>
-                        </table>
+                    <div class="space-y-3">
+                        {% for a in appointments %}
+                        <div class="border p-4 rounded-lg flex justify-between items-center bg-gray-50">
+                            <div>
+                                <div class="font-bold text-indigo-600">{{ a.service_name }}</div>
+                                <div class="text-sm text-gray-600">时间: {{ a.start_time }} ~ {{ a.end_time.split()[1] }}</div>
+                                <div class="text-xs text-gray-500">发型师: {{ a.stylist }}</div>
+                            </div>
+                            <span class="bg-green-100 text-green-800 px-3 py-1 rounded-full text-xs font-bold">{{ a.status }}</span>
+                        </div>
+                        {% else %}
+                        <p class="text-gray-400 text-sm">暂无预约记录</p>
+                        {% endfor %}
                     </div>
                 </div>
 
-                <div>
-                    <h3 class="text-lg font-bold mb-3 text-gray-800">🛍️ 历史消费与收据明细</h3>
-                    <div class="border rounded-lg overflow-x-auto">
-                        <table class="w-full text-left text-sm">
-                            <thead><tr class="bg-gray-50 border-b"><th class="p-3">单号</th><th class="p-3">时间</th><th class="p-3">项目</th><th class="p-3">金额</th><th class="p-3">支付方式</th></tr></thead>
-                            <tbody>
-                                {% for o in orders %}
-                                <tr class="border-b {% if o.status == 'VOID' %}bg-red-50 text-gray-400 line-through{% endif %}">
-                                    <td class="p-3 font-bold">{{ o.order_no }}</td>
-                                    <td class="p-3">{{ o.created_at }}</td>
-                                    <td class="p-3">{{ o.item_name }}</td>
-                                    <td class="p-3 font-bold">RM {{ "%.2f"|format(o.price) }}</td>
-                                    <td class="p-3 font-bold">{{ '已作废' if o.status == 'VOID' else o.payment_details }}</td>
-                                </tr>
-                                {% else %}
-                                <tr><td colspan="5" class="p-4 text-center text-gray-400">暂无消费明细</td></tr>
-                                {% endfor %}
-                            </tbody>
-                        </table>
-                    </div>
-                </div>
-                
-                <div class="text-center pt-4">
-                    <a href="/book" class="inline-block bg-indigo-600 text-white font-bold px-6 py-3 rounded-lg hover:bg-indigo-700 shadow">去预约新服务</a>
+                <div class="bg-white p-6 rounded-xl shadow">
+                    <h3 class="text-lg font-bold mb-3 text-gray-800">🧾 我的消费与充值历史</h3>
+                    <table class="w-full text-left text-sm">
+                        <thead><tr class="border-b bg-gray-50"><th class="p-2">单号</th><th class="p-2">时间</th><th class="p-2">项目</th><th class="p-2">金额</th><th class="p-2">支付</th></tr></thead>
+                        <tbody>
+                            {% for o in orders %}
+                            <tr class="border-b {% if o.status == 'VOID' %}line-through text-gray-400 bg-red-50{% endif %}">
+                                <td class="p-2 font-bold">{{ o.order_no }}</td>
+                                <td class="p-2">{{ o.created_at }}</td>
+                                <td class="p-2">{{ o.item_name }}</td>
+                                <td class="p-2 font-bold">RM {{ "%.2f"|format(o.price) }}</td>
+                                <td class="p-2">{{ '已作废' if o.status == 'VOID' else o.payment_details }}</td>
+                            </tr>
+                            {% else %}
+                            <tr><td colspan="5" class="p-3 text-gray-400">暂无消费订单</td></tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
                 </div>
             </div>
         </body>
         </html>
-    """, cust=cust, orders=orders, appointments=appointments)
+    """, cust=cust, appointments=appointments, orders=orders)
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=5000, debug=True)
