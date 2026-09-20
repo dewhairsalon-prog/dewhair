@@ -65,6 +65,7 @@ def init_db():
             cursor.execute("ALTER TABLE stylists ADD COLUMN IF NOT EXISTS commission_value DOUBLE PRECISION DEFAULT 0.0")
             cursor.execute("ALTER TABLE stylists ADD COLUMN IF NOT EXISTS rank_name TEXT DEFAULT ''")
             cursor.execute("ALTER TABLE services ADD COLUMN IF NOT EXISTS stock_qty INTEGER")
+            cursor.execute("ALTER TABLE services ADD COLUMN IF NOT EXISTS bookable_online BOOLEAN DEFAULT TRUE")
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS staff_ranks (
                     id SERIAL PRIMARY KEY,
@@ -95,6 +96,7 @@ def init_db():
                     FOREIGN KEY(customer_id) REFERENCES customers(id)
                 );
             """)
+            cursor.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS discount_percent DOUBLE PRECISION DEFAULT 0.0")
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS order_items (
                     id SERIAL PRIMARY KEY,
@@ -198,8 +200,13 @@ def get_setting(key, default):
             row = cursor.fetchone()
             return row["value"] if row else default
 
-def find_conflicting_appointment(cursor, stylist, start_str, end_str, exclude_id=None):
-    """检查某发型师在这个时间段是否已经有其他预约（时间区间重叠即视为冲突）"""
+def find_conflicting_appointment(cursor, stylist, start_str, end_str, exclude_id=None, buffer_minutes=0):
+    """检查某发型师在这个时间段是否已经有其他预约（含缓冲时间，缓冲时间内也视为冲突）"""
+    if buffer_minutes:
+        start_dt = datetime.strptime(start_str, "%Y-%m-%d %H:%M") - timedelta(minutes=buffer_minutes)
+        end_dt = datetime.strptime(end_str, "%Y-%m-%d %H:%M") + timedelta(minutes=buffer_minutes)
+        start_str = start_dt.strftime("%Y-%m-%d %H:%M")
+        end_str = end_dt.strftime("%Y-%m-%d %H:%M")
     query = """
         SELECT id FROM appointments
         WHERE stylist = %s AND status = 'CONFIRMED'
@@ -219,7 +226,10 @@ LAYOUT_TEMPLATE = """
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Dew Hair Salon 管理系统</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
     <script src="https://cdn.tailwindcss.com"></script>
+    <style>body { font-family: 'Inter', sans-serif; }</style>
 </head>
 <body class="bg-gray-100 min-h-screen">
     <nav class="bg-indigo-600 text-white p-4 shadow-md">
@@ -277,12 +287,19 @@ def admin_dashboard():
     open_time = get_setting("open_time", "10:00")
     close_time = get_setting("close_time", "20:00")
     closed_wd = get_setting("closed_weekdays", "1")
+    slot_interval = get_setting("slot_interval_minutes", "30")
+    max_advance_days = get_setting("max_advance_days", "30")
+    buffer_minutes = get_setting("buffer_minutes", "0")
     
     current_month_prefix = datetime.now(MY_TZ).strftime("%Y-%m")
     with get_db() as conn:
         with conn.cursor() as cursor:
             cursor.execute("SELECT * FROM services ORDER BY category_type, sub_category")
             services = cursor.fetchall()
+            existing_categories = sorted(set(
+                s["sub_category"] for s in services
+                if s["sub_category"] and s["sub_category"] not in ("Services", "Packages", "Products")
+            ))
             cursor.execute("SELECT * FROM stylists ORDER BY id DESC")
             stylists = cursor.fetchall()
             cursor.execute("SELECT * FROM holidays ORDER BY date_str DESC")
@@ -353,7 +370,7 @@ def admin_dashboard():
 
                 <!-- 营业与休息日设置 -->
                 <div class="bg-white p-6 rounded shadow">
-                    <h2 class="text-xl font-bold mb-4">营业与休息日设置</h2>
+                    <h2 class="text-xl font-bold mb-4">营业与预约设置</h2>
                     <form action="/admin/settings/update" method="POST" class="grid grid-cols-2 md:grid-cols-4 gap-4 items-end mb-4">
                         <div>
                             <label class="block text-sm font-medium">开门时间</label>
@@ -371,6 +388,23 @@ def admin_dashboard():
                                 <option value="2" {% if closed_wd == '2' %}selected{% endif %}>周二休息</option>
                                 <option value="-1" {% if closed_wd == '-1' %}selected{% endif %}>无固定休息日</option>
                             </select>
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium">预约时段间隔 (分钟)</label>
+                            <select name="slot_interval_minutes" class="w-full border rounded p-2">
+                                <option value="15" {% if slot_interval == '15' %}selected{% endif %}>每 15 分钟</option>
+                                <option value="30" {% if slot_interval == '30' %}selected{% endif %}>每 30 分钟</option>
+                                <option value="45" {% if slot_interval == '45' %}selected{% endif %}>每 45 分钟</option>
+                                <option value="60" {% if slot_interval == '60' %}selected{% endif %}>每 60 分钟</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium">顾客最多可提前预约 (天)</label>
+                            <input type="number" name="max_advance_days" value="{{ max_advance_days }}" min="1" class="w-full border rounded p-2" placeholder="例如: 30">
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium">同一发型师预约间缓冲时间 (分钟)</label>
+                            <input type="number" name="buffer_minutes" value="{{ buffer_minutes }}" min="0" class="w-full border rounded p-2" placeholder="例如: 10 (0 = 不留缓冲)">
                         </div>
                         <div>
                             <button class="w-full bg-indigo-600 text-white font-bold py-2 rounded hover:bg-indigo-700">保存设置</button>
@@ -428,11 +462,12 @@ def admin_dashboard():
                 <div class="bg-white p-6 rounded shadow">
                     <h2 class="text-xl font-bold mb-4">项目与充值套餐管理</h2>
                     <table class="w-full text-left">
-                        <thead><tr class="border-b"><th class="p-2">分类</th><th class="p-2">名称</th><th class="p-2">售价 (RM)</th><th class="p-2">获得 Credit (RM)</th><th class="p-2">库存</th><th class="p-2">操作</th></tr></thead>
+                        <thead><tr class="border-b"><th class="p-2">类型</th><th class="p-2">分类标签</th><th class="p-2">名称</th><th class="p-2">售价 (RM)</th><th class="p-2">获得 Credit (RM)</th><th class="p-2">库存</th><th class="p-2">线上预约</th><th class="p-2">操作</th></tr></thead>
                         <tbody>
                             {% for item in services %}
                             <tr class="border-b {% if item.category_type == 'Products' and item.stock_qty is not none and item.stock_qty <= 5 %}bg-orange-50{% endif %}">
                                 <td class="p-2 font-bold text-indigo-600">{{ item.category_type }}</td>
+                                <td class="p-2 text-gray-600">{{ item.sub_category }}</td>
                                 <td class="p-2">{{ item.name }}</td>
                                 <td class="p-2 font-bold text-red-600">RM {{ "%.2f"|format(item.price) }}</td>
                                 <td class="p-2 font-bold text-green-600">{% if item.category_type == 'Packages' %}RM {{ "%.2f"|format(item.credit_value) }}{% else %}-{% endif %}</td>
@@ -444,6 +479,13 @@ def admin_dashboard():
                                             <input type="number" name="delta" placeholder="+数量" class="border rounded p-1 w-16 text-xs" required>
                                             <button class="bg-green-600 text-white px-2 py-1 rounded text-[10px] font-bold hover:bg-green-700">补货</button>
                                         </form>
+                                    {% else %}-{% endif %}
+                                </td>
+                                <td class="p-2">
+                                    {% if item.category_type == 'Services' %}
+                                        <a href="/admin/service/toggle_online/{{ item.id }}" class="text-xs font-bold px-2 py-1 rounded {% if item.bookable_online %}bg-green-100 text-green-700{% else %}bg-gray-100 text-gray-500{% endif %}">
+                                            {% if item.bookable_online %}✅ 已开放{% else %}🚫 仅限POS{% endif %}
+                                        </a>
                                     {% else %}-{% endif %}
                                 </td>
                                 <td class="p-2">
@@ -489,6 +531,15 @@ def admin_dashboard():
                             </select>
                         </div>
                         <div class="mb-3">
+                            <label class="block text-sm font-medium">服务分类标签 (用于 POS 分类，如: 剪发/染发/美甲)</label>
+                            <input type="text" name="sub_category" list="existing_categories" class="w-full border rounded p-2" placeholder="例如: 剪发">
+                            <datalist id="existing_categories">
+                                {% for c in existing_categories %}
+                                <option value="{{ c }}">
+                                {% endfor %}
+                            </datalist>
+                        </div>
+                        <div class="mb-3">
                             <label class="block text-sm font-medium">售价 / 金额 (RM)</label>
                             <input type="number" step="0.01" name="price" class="w-full border rounded p-2" required>
                         </div>
@@ -504,6 +555,10 @@ def admin_dashboard():
                             <label class="block text-sm font-medium">耗时 (分钟，零售产品可填0)</label>
                             <input type="number" name="duration" class="w-full border rounded p-2" value="30" required>
                         </div>
+                        <div class="mb-4 flex items-center gap-2">
+                            <input type="checkbox" name="bookable_online" id="bookable_online_chk" checked class="w-4 h-4">
+                            <label for="bookable_online_chk" class="text-sm font-medium">开放顾客线上预约（取消勾选则只能后台 POS 销售，不会出现在顾客预约页面）</label>
+                        </div>
                         <button class="w-full bg-indigo-600 text-white font-bold py-2 rounded hover:bg-indigo-700">确认添加服务</button>
                     </form>
                 </div>
@@ -515,7 +570,7 @@ def admin_dashboard():
                 document.getElementById('stock_qty_div').style.display = (sel.value === 'Products') ? 'block' : 'none';
             }
         </script>
-    """), services=services, stylists=stylists, holidays=holidays, open_time=open_time, close_time=close_time, closed_wd=closed_wd, current_month=current_month_prefix, staff_performance=staff_performance)
+    """), services=services, stylists=stylists, holidays=holidays, open_time=open_time, close_time=close_time, closed_wd=closed_wd, current_month=current_month_prefix, staff_performance=staff_performance, existing_categories=existing_categories, slot_interval=slot_interval, max_advance_days=max_advance_days, buffer_minutes=buffer_minutes)
 
 @app.route("/admin/stylist/add", methods=["POST"])
 @admin_required
@@ -781,11 +836,17 @@ def update_settings():
     open_time = request.form.get("open_time", "10:00")
     close_time = request.form.get("close_time", "20:00")
     closed_weekdays = request.form.get("closed_weekdays", "1")
+    slot_interval_minutes = request.form.get("slot_interval_minutes", "30")
+    max_advance_days = request.form.get("max_advance_days", "30") or "30"
+    buffer_minutes = request.form.get("buffer_minutes", "0") or "0"
     with get_db() as conn:
         with conn.cursor() as cursor:
             cursor.execute("INSERT INTO settings (key, value) VALUES ('open_time', %s) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", (open_time,))
             cursor.execute("INSERT INTO settings (key, value) VALUES ('close_time', %s) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", (close_time,))
             cursor.execute("INSERT INTO settings (key, value) VALUES ('closed_weekdays', %s) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", (closed_weekdays,))
+            cursor.execute("INSERT INTO settings (key, value) VALUES ('slot_interval_minutes', %s) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", (slot_interval_minutes,))
+            cursor.execute("INSERT INTO settings (key, value) VALUES ('max_advance_days', %s) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", (max_advance_days,))
+            cursor.execute("INSERT INTO settings (key, value) VALUES ('buffer_minutes', %s) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", (buffer_minutes,))
             conn.commit()
     return redirect(url_for("admin_dashboard"))
 
@@ -817,16 +878,27 @@ def delete_holiday(id):
 def add_service():
     name = request.form.get("name")
     cat = request.form.get("category_type")
+    sub_category = (request.form.get("sub_category") or "").strip() or cat
     price = float(request.form.get("price", 0))
     duration = int(request.form.get("duration", 30))
     credit_value = float(request.form.get("credit_value", 0)) if cat == 'Packages' else 0.0
     stock_qty = int(request.form.get("stock_qty") or 0) if cat == 'Products' else None
+    bookable_online = request.form.get("bookable_online") == "on"
     with get_db() as conn:
         with conn.cursor() as cursor:
             cursor.execute("""
-                INSERT INTO services (name, category_type, sub_category, price, duration, credit_value, stock_qty) 
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
-            """, (name, cat, cat, price, duration, credit_value, stock_qty))
+                INSERT INTO services (name, category_type, sub_category, price, duration, credit_value, stock_qty, bookable_online) 
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            """, (name, cat, sub_category, price, duration, credit_value, stock_qty, bookable_online))
+            conn.commit()
+    return redirect(url_for("admin_dashboard"))
+
+@app.route("/admin/service/toggle_online/<int:id>")
+@admin_required
+def admin_service_toggle_online(id):
+    with get_db() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute("UPDATE services SET bookable_online = NOT COALESCE(bookable_online, TRUE) WHERE id = %s", (id,))
             conn.commit()
     return redirect(url_for("admin_dashboard"))
 
@@ -1320,15 +1392,13 @@ def admin_appointments():
         
     open_time_str = get_setting("open_time", "10:00")
     close_time_str = get_setting("close_time", "20:00")
+    slot_interval_min = int(get_setting("slot_interval_minutes", "30") or 30)
     timeslots = []
     st = datetime.strptime(open_time_str, "%H:%M")
     et = datetime.strptime(close_time_str, "%H:%M")
     while st <= et:
         timeslots.append(st.strftime("%H:%M"))
-        st += timedelta(minutes=30)
-
-    # ---- 组装日历时间轴所需的数据（类似 Tunai Pro 的排班表：横轴是发型师，纵轴是时间）----
-    PX_PER_MIN = 1.6
+        st += timedelta(minutes=slot_interval_min)
     COLOR_PALETTE = [
         {"bg": "#eef2ff", "border": "#6366f1", "text": "#4338ca"},  # indigo
         {"bg": "#ecfeff", "border": "#06b6d4", "text": "#0e7490"},  # cyan
@@ -1411,7 +1481,7 @@ def admin_add_appointment():
             start_str = start_dt.strftime("%Y-%m-%d %H:%M")
             end_str = end_dt.strftime("%Y-%m-%d %H:%M")
 
-            if find_conflicting_appointment(cursor, stylist, start_str, end_str):
+            if find_conflicting_appointment(cursor, stylist, start_str, end_str, buffer_minutes=int(get_setting("buffer_minutes", "0") or 0)):
                 return redirect(url_for("admin_appointments", date=b_date, error="该发型师这个时间段已经有预约了，请换个时间或发型师！"))
             
             cursor.execute("SELECT id FROM customers WHERE phone = %s", (c_phone,))
@@ -1563,9 +1633,15 @@ def build_receipt_pdf(order, items):
     elements.append(Spacer(1, 14))
 
     table_data = [["Item", "Staff", "Price (RM)"]]
+    subtotal = 0.0
     for item in items:
         staff_names = ", ".join(c["staff_name"] for c in item.get("collaborators", [])) or (item.get("staff_name") or "-")
         table_data.append([item["item_name"], staff_names, f"{item['price']:.2f}"])
+        subtotal += item["price"]
+    discount_pct = order.get("discount_percent") or 0
+    if discount_pct > 0:
+        table_data.append(["", "Subtotal", f"RM {subtotal:.2f}"])
+        table_data.append(["", f"Discount ({discount_pct:.1f}%)", f"- RM {(subtotal - order['total_amount']):.2f}"])
     table_data.append(["", "Total", f"RM {order['total_amount']:.2f}"])
 
     tbl = Table(table_data, colWidths=[70*mm, 60*mm, 30*mm])
@@ -1711,8 +1787,11 @@ def admin_order_invoice(id):
                     {% endfor %}
                 </tbody>
             </table>
-            <div style="text-align:right;font-size:18px;font-weight:bold;margin-bottom:20px;">
-                Total Amount: <span style="color:#dc2626;">RM {{ "%.2f"|format(order.total_amount) }}</span>
+            <div style="text-align:right;margin-bottom:20px;">
+                {% if order.discount_percent and order.discount_percent > 0 %}
+                <div style="font-size:13px;color:#dc2626;margin-bottom:4px;">Discount applied: {{ "%.1f"|format(order.discount_percent) }}%</div>
+                {% endif %}
+                <div style="font-size:18px;font-weight:bold;">Total Amount: <span style="color:#dc2626;">RM {{ "%.2f"|format(order.total_amount) }}</span></div>
             </div>
             <div style="display:flex;gap:10px;flex-wrap:wrap;">
                 <a href="/receipt/{{ order.customer_token }}/{{ order.id }}" target="_blank" style="flex:1;text-align:center;padding:12px;background:#dc2626;color:white;text-decoration:none;border-radius:6px;font-weight:bold;">📄 查看真正的 PDF 收据</a>
@@ -1973,45 +2052,75 @@ def admin_payroll_print():
 def admin_pos():
     with get_db() as conn:
         with conn.cursor() as cursor:
-            cursor.execute("SELECT * FROM services")
+            cursor.execute("SELECT * FROM services ORDER BY sub_category, name")
             services = cursor.fetchall()
             cursor.execute("SELECT * FROM stylists")
             stylists = cursor.fetchall()
             cursor.execute("SELECT * FROM customers")
             customers = cursor.fetchall()
+    pos_categories = []
+    seen = set()
+    for s in services:
+        c = s["sub_category"] or s["category_type"]
+        if c not in seen:
+            seen.add(c)
+            pos_categories.append(c)
     stylists_json = json.dumps([
         {"name": st["name"], "title": st["title"], "commission_type": st["commission_type"], "commission_value": st["commission_value"]}
         for st in stylists
     ])
     return render_template_string(LAYOUT_TEMPLATE.replace("{% block content %}{% endblock %}", """
         <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
-            <div class="md:col-span-2 bg-white p-6 rounded-lg shadow">
-                <h2 class="text-xl font-bold mb-4">点选服务 / 套餐 / 产品 (POS)</h2>
-                <div class="grid grid-cols-3 gap-4">
+            <div class="md:col-span-2 bg-white p-5 rounded-2xl shadow-sm border border-gray-100">
+                <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4">
+                    <h2 class="text-lg font-bold text-gray-900">Point of Sale</h2>
+                    <input type="text" id="pos_search" oninput="filterPOS()" placeholder="🔍 搜索项目名称..." class="border border-gray-200 rounded-lg px-3 py-2 text-sm w-full sm:w-56 focus:border-indigo-500 focus:outline-none">
+                </div>
+
+                <!-- 分类标签页 -->
+                <div class="flex gap-2 overflow-x-auto pb-3 mb-3 border-b border-gray-100">
+                    <button onclick="filterPOS('__all__')" data-cat-btn="__all__" class="pos-tab flex-shrink-0 px-3.5 py-1.5 rounded-full text-xs font-bold bg-indigo-600 text-white">全部</button>
+                    {% for c in pos_categories %}
+                    <button onclick="filterPOS('{{ c }}')" data-cat-btn="{{ c }}" class="pos-tab flex-shrink-0 px-3.5 py-1.5 rounded-full text-xs font-bold bg-gray-100 text-gray-600 hover:bg-gray-200">{{ c }}</button>
+                    {% endfor %}
+                </div>
+
+                <div class="grid grid-cols-2 sm:grid-cols-3 gap-3" id="pos_grid">
                     {% for item in services %}
-                    <button onclick="addToOrder('{{ item.name }}', {{ item.price }})" class="p-4 border rounded hover:bg-indigo-50 text-left">
-                        <div class="text-xs text-indigo-600 font-bold">{{ item.category_type }}</div>
-                        <div class="font-bold text-lg">{{ item.name }}</div>
-                        <div class="text-gray-600">RM {{ "%.2f"|format(item.price) }}</div>
+                    <button onclick="addToOrder('{{ item.name }}', {{ item.price }})" data-cat="{{ item.sub_category or item.category_type }}" data-name="{{ item.name|lower }}" class="pos-item p-3.5 border border-gray-100 rounded-xl hover:border-indigo-400 hover:shadow-md text-left transition bg-white">
+                        <div class="flex items-center justify-between mb-1">
+                            <span class="text-[10px] font-bold px-1.5 py-0.5 rounded bg-gray-100 text-gray-500">{{ item.category_type }}</span>
+                        </div>
+                        <div class="font-semibold text-gray-900 text-sm leading-snug">{{ item.name }}</div>
+                        <div class="text-indigo-600 font-bold text-sm mt-1">RM {{ "%.2f"|format(item.price) }}</div>
                         {% if item.category_type == 'Products' %}
-                            <div class="text-[11px] font-bold mt-1 {% if item.stock_qty is none or item.stock_qty <= 0 %}text-red-600{% elif item.stock_qty <= 5 %}text-orange-600{% else %}text-gray-400{% endif %}">
+                            <div class="text-[10px] font-bold mt-1 {% if item.stock_qty is none or item.stock_qty <= 0 %}text-red-600{% elif item.stock_qty <= 5 %}text-orange-600{% else %}text-gray-400{% endif %}">
                                 库存: {{ item.stock_qty if item.stock_qty is not none else 0 }}{% if item.stock_qty is not none and item.stock_qty <= 0 %} (缺货){% endif %}
                             </div>
                         {% endif %}
                     </button>
                     {% endfor %}
                 </div>
+                <p id="pos_empty_hint" class="hidden text-center text-gray-400 text-sm py-8">没有符合条件的项目</p>
             </div>
-            <div class="bg-white p-6 rounded-lg shadow">
-                <h2 class="text-xl font-bold mb-4">当前订单结账</h2>
-                <div id="order-items" class="min-h-[150px] border-b mb-4 pb-2"><p class="text-gray-400">点击左侧项目加入订单</p></div>
-                <div class="text-xl font-bold mb-4">总金额: <span id="total-amount" class="text-red-600">RM 0.00</span></div>
+            <div class="bg-white p-5 rounded-2xl shadow-sm border border-gray-100 h-fit">
+                <h2 class="text-lg font-bold text-gray-900 mb-4">当前订单结账</h2>
+                <div id="order-items" class="min-h-[150px] border-b border-gray-100 mb-4 pb-2"><p class="text-gray-400 text-sm">点击左侧项目加入订单</p></div>
+
+                <div class="mb-3 flex items-center justify-between gap-2">
+                    <label class="text-xs font-semibold text-gray-500">整单折扣 %</label>
+                    <input type="number" id="discount_percent" min="0" max="100" step="0.1" value="0" oninput="renderCart()" class="w-20 border border-gray-200 rounded-lg p-1.5 text-sm text-right">
+                </div>
+                <div class="text-sm text-gray-500 flex justify-between mb-1"><span>小计</span><span>RM <span id="subtotal-amount">0.00</span></span></div>
+                <div class="text-sm text-red-500 flex justify-between mb-1" id="discount-row" style="display:none;"><span>折扣</span><span>- RM <span id="discount-amount">0.00</span></span></div>
+                <div class="text-lg font-bold mb-4 flex justify-between border-t border-gray-100 pt-2"><span class="text-gray-700 text-sm font-medium">应付总额</span><span class="text-red-600">RM <span id="total-amount">0.00</span></span></div>
                 
                 <form action="/admin/checkout" method="POST">
                     <input type="hidden" name="cart_data" id="cart_data_input">
+                    <input type="hidden" name="discount_percent" id="discount_percent_input" value="0">
                     <div class="mb-3">
-                        <label class="block text-sm font-medium">选择已有会员</label>
-                        <select name="customer_phone" id="cust_select" onchange="fillCustomer(this)" class="w-full border rounded p-2">
+                        <label class="block text-xs font-semibold text-gray-500 mb-1">选择已有会员</label>
+                        <select name="customer_phone" id="cust_select" onchange="fillCustomer(this)" class="w-full border border-gray-200 rounded-lg p-2 text-sm">
                             <option value="">-- 新客或手动输入 --</option>
                             {% for c in customers %}
                             <option value="{{ c.phone }}" data-name="{{ c.name }}">{{ c.name }} ({{ c.phone }}) - 余额: RM {{ c.credits }}</option>
@@ -2019,23 +2128,23 @@ def admin_pos():
                         </select>
                     </div>
                     <div class="mb-3">
-                        <label class="block text-sm font-medium">顾客姓名</label>
-                        <input type="text" name="customer_name" id="cust_name" class="w-full border rounded p-2" required>
+                        <label class="block text-xs font-semibold text-gray-500 mb-1">顾客姓名</label>
+                        <input type="text" name="customer_name" id="cust_name" class="w-full border border-gray-200 rounded-lg p-2 text-sm" required>
                     </div>
                     <div class="mb-3">
-                        <label class="block text-sm font-medium">顾客电话</label>
-                        <input type="text" name="customer_phone_input" id="cust_phone" class="w-full border rounded p-2" required>
+                        <label class="block text-xs font-semibold text-gray-500 mb-1">顾客电话</label>
+                        <input type="text" name="customer_phone_input" id="cust_phone" class="w-full border border-gray-200 rounded-lg p-2 text-sm" required>
                     </div>
                     <div class="mb-4">
-                        <label class="block text-sm font-medium mb-1">支付方式</label>
-                        <select name="payment_method" class="w-full border rounded p-2">
+                        <label class="block text-xs font-semibold text-gray-500 mb-1">支付方式</label>
+                        <select name="payment_method" class="w-full border border-gray-200 rounded-lg p-2 text-sm">
                             <option value="Cash">Cash (现金)</option>
                             <option value="Credit Card">Credit Card (刷卡)</option>
                             <option value="TNG / QRPay">TNG / QRPay (电子钱包)</option>
                             <option value="Credit Balance Deduct">Credit Balance Deduct (储值余额扣款)</option>
                         </select>
                     </div>
-                    <button class="w-full bg-green-600 text-white font-bold py-3 rounded hover:bg-green-700">完成收款与记账</button>
+                    <button class="w-full bg-green-600 text-white font-bold py-3 rounded-xl hover:bg-green-700 shadow-sm">完成收款与记账</button>
                 </form>
             </div>
         </div>
@@ -2066,7 +2175,26 @@ def admin_pos():
         <script>
             let cart = [];
             let editingIndex = null;
+            let currentCat = '__all__';
             const STYLISTS = {{ stylists_json|safe }};
+
+            function filterPOS(cat) {
+                if (cat !== undefined) currentCat = cat;
+                document.querySelectorAll('.pos-tab').forEach(btn => {
+                    const active = btn.getAttribute('data-cat-btn') === currentCat;
+                    btn.className = 'pos-tab flex-shrink-0 px-3.5 py-1.5 rounded-full text-xs font-bold ' + (active ? 'bg-indigo-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200');
+                });
+                const query = document.getElementById('pos_search').value.trim().toLowerCase();
+                let visibleCount = 0;
+                document.querySelectorAll('.pos-item').forEach(el => {
+                    const matchesCat = currentCat === '__all__' || el.getAttribute('data-cat') === currentCat;
+                    const matchesSearch = !query || el.getAttribute('data-name').includes(query);
+                    const show = matchesCat && matchesSearch;
+                    el.style.display = show ? '' : 'none';
+                    if (show) visibleCount++;
+                });
+                document.getElementById('pos_empty_hint').classList.toggle('hidden', visibleCount > 0);
+            }
 
             function addToOrder(name, price) {
                 cart.push({name, price, collaborators: []});
@@ -2168,9 +2296,9 @@ def admin_pos():
 
             function renderCart() {
                 const container = document.getElementById('order-items');
-                let total = 0; container.innerHTML = '';
+                let subtotal = 0; container.innerHTML = '';
                 cart.forEach((item, index) => {
-                    total += item.price;
+                    subtotal += item.price;
                     const collabs = item.collaborators || [];
                     const staffSummary = collabs.length > 0
                         ? collabs.map(c => `${c.staff}(RM${c.commission.toFixed(2)})`).join(' + ')
@@ -2188,7 +2316,17 @@ def admin_pos():
                             </div>
                         </div>`;
                 });
-                document.getElementById('total-amount').innerText = 'RM ' + total.toFixed(2);
+                let discountPct = parseFloat(document.getElementById('discount_percent').value) || 0;
+                if (discountPct < 0) discountPct = 0;
+                if (discountPct > 100) discountPct = 100;
+                const discountAmt = subtotal * (discountPct / 100);
+                const finalTotal = subtotal - discountAmt;
+
+                document.getElementById('subtotal-amount').innerText = subtotal.toFixed(2);
+                document.getElementById('discount-row').style.display = discountPct > 0 ? 'flex' : 'none';
+                document.getElementById('discount-amount').innerText = discountAmt.toFixed(2);
+                document.getElementById('total-amount').innerText = finalTotal.toFixed(2);
+                document.getElementById('discount_percent_input').value = discountPct;
                 document.getElementById('cart_data_input').value = JSON.stringify(cart);
             }
 
@@ -2200,7 +2338,7 @@ def admin_pos():
                 }
             }
         </script>
-    """), services=services, stylists=stylists, customers=customers, stylists_json=stylists_json)
+    """), services=services, stylists=stylists, customers=customers, stylists_json=stylists_json, pos_categories=pos_categories)
 
 @app.route("/admin/checkout", methods=["POST"])
 @admin_required
@@ -2212,7 +2350,10 @@ def checkout():
         name = request.form.get("customer_name")
         phone = request.form.get("customer_phone_input") or request.form.get("customer_phone")
         pay_method = request.form.get("payment_method")
-        total = sum(item["price"] for item in cart_data)
+        subtotal = sum(item["price"] for item in cart_data)
+        discount_percent = float(request.form.get("discount_percent", 0) or 0)
+        discount_percent = max(0.0, min(100.0, discount_percent))
+        total = round(subtotal * (1 - discount_percent / 100), 2)
         
         current_time_str = get_current_time()
         order_no = "INV" + datetime.now(MY_TZ).strftime("%Y%m%d%H%M%S")
@@ -2247,7 +2388,7 @@ def checkout():
                     current_credits -= total
                     cursor.execute("UPDATE customers SET credits = %s WHERE id = %s", (current_credits, cust_id))
                     
-                cursor.execute("INSERT INTO orders (order_no, customer_id, total_amount, payment_details, status, created_at) VALUES (%s, %s, %s, %s, 'NORMAL', %s) RETURNING id", (order_no, cust_id, total, pay_method, current_time_str))
+                cursor.execute("INSERT INTO orders (order_no, customer_id, total_amount, payment_details, status, created_at, discount_percent) VALUES (%s, %s, %s, %s, 'NORMAL', %s, %s) RETURNING id", (order_no, cust_id, total, pay_method, current_time_str, discount_percent))
                 order_id = cursor.fetchone()["id"]
                 
                 for item in cart_data:
@@ -2369,7 +2510,7 @@ BOOKING_CALENDAR_TEMPLATE = """
                         <span class="step-badge">3</span>
                         <h2 class="font-bold text-gray-900">Select a date</h2>
                     </div>
-                    <input type="date" name="booking_date" id="booking_date" value="{{ selected_date }}" min="{{ today_str }}" class="border border-gray-200 rounded-lg px-2 py-1.5 text-sm text-indigo-600 font-semibold" onchange="selectDateCard(this.value)">
+                    <input type="date" name="booking_date" id="booking_date" value="{{ selected_date }}" min="{{ today_str }}" max="{{ max_date }}" class="border border-gray-200 rounded-lg px-2 py-1.5 text-sm text-indigo-600 font-semibold" onchange="selectDateCard(this.value)">
                 </div>
                 <div class="flex gap-2 overflow-x-auto pb-1">
                     {% for d in date_strip %}
@@ -2455,22 +2596,25 @@ def index():
                 if d_str == today_str: wd_str = "Today"
                 date_strip.append({"date_str": d_str, "display_date": d.strftime("%m-%d"), "year": d.strftime("%Y"), "weekday": wd_str})
                 
-            cursor.execute("SELECT * FROM services WHERE category_type != 'Packages'")
+            cursor.execute("SELECT * FROM services WHERE category_type != 'Packages' AND COALESCE(bookable_online, TRUE) = TRUE")
             services = cursor.fetchall()
             cursor.execute("SELECT * FROM stylists")
             stylists = cursor.fetchall()
             
     open_time_str = get_setting("open_time", "10:00")
     close_time_str = get_setting("close_time", "20:00")
+    slot_interval_min = int(get_setting("slot_interval_minutes", "30") or 30)
+    max_advance_days = int(get_setting("max_advance_days", "30") or 30)
+    max_date_str = (datetime.now(MY_TZ) + timedelta(days=max_advance_days)).strftime("%Y-%m-%d")
     timeslots = []
     st = datetime.strptime(open_time_str, "%H:%M")
     et = datetime.strptime(close_time_str, "%H:%M")
     while st <= et:
         timeslots.append(st.strftime("%H:%M"))
-        st += timedelta(minutes=30)
+        st += timedelta(minutes=slot_interval_min)
         
     error = request.args.get("error")
-    return render_template_string(BOOKING_CALENDAR_TEMPLATE, services=services, stylists=stylists, date_strip=date_strip, selected_date=selected_date, today_str=today_str, open_time=open_time_str, close_time=close_time_str, timeslots=timeslots, error=error)
+    return render_template_string(BOOKING_CALENDAR_TEMPLATE, services=services, stylists=stylists, date_strip=date_strip, selected_date=selected_date, today_str=today_str, open_time=open_time_str, close_time=close_time_str, timeslots=timeslots, error=error, max_date=max_date_str)
 
 @app.route("/book", methods=["POST"])
 def book_appointment():
@@ -2492,6 +2636,10 @@ def book_appointment():
             closed_wd = get_setting("closed_weekdays", "1")
             if closed_wd != '-1' and dt_obj.weekday() == int(closed_wd):
                 return redirect(url_for("index", date=b_date, error="We're closed on this day of the week. Please pick another day."))
+
+            max_advance_days = int(get_setting("max_advance_days", "30") or 30)
+            if dt_obj.date() > (datetime.now(MY_TZ).date() + timedelta(days=max_advance_days)):
+                return redirect(url_for("index", date=b_date, error=f"Bookings can only be made up to {max_advance_days} days in advance."))
                 
             cursor.execute("SELECT duration FROM services WHERE id = %s", (service_id,))
             srv = cursor.fetchone()
@@ -2502,8 +2650,9 @@ def book_appointment():
             start_str = start_dt.strftime("%Y-%m-%d %H:%M")
             end_str = end_dt.strftime("%Y-%m-%d %H:%M")
 
-            # 检查该发型师这个时间段是否已被预约
-            if find_conflicting_appointment(cursor, stylist, start_str, end_str):
+            # 检查该发型师这个时间段是否已被预约（含缓冲时间）
+            buffer_minutes = int(get_setting("buffer_minutes", "0") or 0)
+            if find_conflicting_appointment(cursor, stylist, start_str, end_str, buffer_minutes=buffer_minutes):
                 return redirect(url_for("index", date=b_date, error="This stylist already has a booking at that time. Please choose another time or stylist."))
             
             cursor.execute("SELECT id, token FROM customers WHERE phone = %s", (c_phone,))
@@ -2581,12 +2730,22 @@ def customer_portal(token):
                                 <div class="text-xs text-gray-500">{{ a.start_time }} - {{ a.end_time.split()[1] }}</div>
                                 <div class="text-xs text-gray-400">Stylist: {{ a.stylist }}</div>
                             </div>
-                            <span class="bg-green-100 text-green-700 px-2.5 py-1 rounded-full text-[11px] font-bold">{{ a.status }}</span>
+                            <div class="text-right">
+                                <span class="bg-green-100 text-green-700 px-2.5 py-1 rounded-full text-[11px] font-bold">{{ a.status }}</span>
+                                {% if a.status == 'CONFIRMED' and a.start_time > now_str %}
+                                <div class="mt-1.5">
+                                    <a href="/appointment/cancel/{{ token }}/{{ a.id }}" onclick="return confirm('Cancel this appointment?')" class="text-red-500 text-[11px] font-bold hover:text-red-700">Cancel</a>
+                                </div>
+                                {% endif %}
+                            </div>
                         </div>
                         {% else %}
                         <p class="text-gray-400 text-sm">No appointments yet</p>
                         {% endfor %}
                     </div>
+                </div>
+                <div class="text-center">
+                    <a href="/" class="text-indigo-600 text-sm font-semibold hover:underline">+ Book a new appointment</a>
                 </div>
 
                 <div class="bg-white p-6 rounded-2xl shadow-sm border border-gray-100">
@@ -2611,7 +2770,23 @@ def customer_portal(token):
             </div>
         </body>
         </html>
-    """, cust=cust, appointments=appointments, orders=orders)
+    """, cust=cust, appointments=appointments, orders=orders, now_str=datetime.now(MY_TZ).strftime("%Y-%m-%d %H:%M"), token=token)
+
+@app.route("/appointment/cancel/<token>/<int:appointment_id>")
+def customer_cancel_appointment(token, appointment_id):
+    """顾客在会员中心自助取消自己的预约（需要 token 与预约的顾客匹配才允许）"""
+    with get_db() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute("""
+                SELECT a.id FROM appointments a
+                JOIN customers c ON a.customer_id = c.id
+                WHERE a.id = %s AND c.token = %s AND a.status = 'CONFIRMED'
+            """, (appointment_id, token))
+            appt = cursor.fetchone()
+            if appt:
+                cursor.execute("UPDATE appointments SET status = 'CANCELLED' WHERE id = %s", (appointment_id,))
+                conn.commit()
+    return redirect(url_for("customer_portal", token=token))
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)
