@@ -1090,7 +1090,63 @@ ADMIN_APPOINTMENTS_TEMPLATE = """
                 </div>
             </div>
 
-            <div class="overflow-x-auto">
+            <div class="flex items-center justify-end gap-2 mb-3">
+                <button onclick="showView('timeline')" id="btn-view-timeline" class="text-xs font-bold px-3 py-1.5 rounded-lg bg-indigo-600 text-white">📅 时间轴视图</button>
+                <button onclick="showView('list')" id="btn-view-list" class="text-xs font-bold px-3 py-1.5 rounded-lg bg-gray-100 text-gray-600">📋 列表视图</button>
+            </div>
+
+            <!-- 时间轴视图（默认） -->
+            <div id="view-timeline">
+                {% if timeline_columns %}
+                <div class="overflow-x-auto border border-gray-100 rounded-xl">
+                    <div class="flex" style="min-width: {{ 64 + timeline_columns|length * 200 }}px;">
+                        <!-- 左侧时间刻度列 -->
+                        <div class="flex-shrink-0 w-16 relative border-r border-gray-100 bg-gray-50" style="height: {{ timeline_height + 40 }}px;">
+                            <div class="h-10 border-b border-gray-100"></div>
+                            <div class="relative" style="height: {{ timeline_height }}px;">
+                                {% for hm in hour_marks %}
+                                <div class="absolute left-0 right-0 text-[10px] text-gray-400 font-semibold px-1 -translate-y-1/2" style="top: {{ "%.0f"|format(hm.top) }}px;">{{ hm.label }}</div>
+                                {% endfor %}
+                            </div>
+                        </div>
+                        <!-- 每位发型师一列 -->
+                        {% for col in timeline_columns %}
+                        <div class="flex-shrink-0 border-r border-gray-100 last:border-r-0" style="width: 200px;">
+                            <div class="h-10 flex items-center gap-2 px-3 border-b border-gray-100 bg-gray-50 sticky top-0">
+                                <div class="w-6 h-6 rounded-full flex items-center justify-center text-[11px] font-bold" style="background:{{ col.color.bg }}; color:{{ col.color.text }};">{{ col.name[0] }}</div>
+                                <div class="min-w-0">
+                                    <div class="text-xs font-bold text-gray-800 truncate">{{ col.name }}</div>
+                                    <div class="text-[10px] text-gray-400 truncate">{{ col.title }}</div>
+                                </div>
+                            </div>
+                            <div class="relative" style="height: {{ timeline_height }}px; background-image: repeating-linear-gradient(to bottom, #f3f4f6 0, #f3f4f6 1px, transparent 1px, transparent {{ "%.0f"|format(60 * 1.6) }}px);">
+                                {% for hm in hour_marks %}
+                                <div class="absolute left-0 right-0 border-t border-gray-100" style="top: {{ "%.0f"|format(hm.top) }}px;"></div>
+                                {% endfor %}
+                                {% for block in timeline_blocks.get(col.key, []) %}
+                                <div class="absolute left-1 right-1 rounded-lg border-l-4 px-2 py-1 overflow-hidden shadow-sm hover:shadow-md transition cursor-default" style="top: {{ "%.0f"|format(block.top) }}px; height: {{ "%.0f"|format(block.height) }}px; background:{{ block.color.bg }}; border-color:{{ block.color.border }};">
+                                    <div class="flex justify-between items-start gap-1">
+                                        <div class="min-w-0">
+                                            <div class="text-[11px] font-bold truncate" style="color:{{ block.color.text }};">{{ block.customer_name }}</div>
+                                            <div class="text-[10px] text-gray-600 truncate">{{ block.service_name }}</div>
+                                            <div class="text-[9px] text-gray-400">{{ block.time_range }}</div>
+                                        </div>
+                                        <a href="/admin/appointment/delete/{{ block.id }}" onclick="event.stopPropagation(); return confirm('确定取消此预约吗？')" class="text-[11px] font-bold text-red-400 hover:text-red-600 flex-shrink-0">×</a>
+                                    </div>
+                                </div>
+                                {% endfor %}
+                            </div>
+                        </div>
+                        {% endfor %}
+                    </div>
+                </div>
+                {% else %}
+                <div class="p-8 text-center text-gray-400 border border-gray-100 rounded-xl">还没有添加发型师，先去「员工与佣金管理」添加员工，时间轴才会有列可以显示。</div>
+                {% endif %}
+            </div>
+
+            <!-- 列表视图（备用，方便一次看细节/电话） -->
+            <div id="view-list" class="hidden overflow-x-auto">
                 <table class="w-full text-left border-collapse">
                     <thead>
                         <tr class="border-b bg-gray-50 text-gray-700 text-sm">
@@ -1194,6 +1250,12 @@ ADMIN_APPOINTMENTS_TEMPLATE = """
         function changeAdminDate(dateStr) { window.location.href = "/admin/appointments?date=" + dateStr; }
         function openAdminBookModal() { document.getElementById('adminBookModal').classList.remove('hidden'); }
         function closeAdminBookModal() { document.getElementById('adminBookModal').classList.add('hidden'); }
+        function showView(view) {
+            document.getElementById('view-timeline').classList.toggle('hidden', view !== 'timeline');
+            document.getElementById('view-list').classList.toggle('hidden', view !== 'list');
+            document.getElementById('btn-view-timeline').className = 'text-xs font-bold px-3 py-1.5 rounded-lg ' + (view === 'timeline' ? 'bg-indigo-600 text-white' : 'bg-gray-100 text-gray-600');
+            document.getElementById('btn-view-list').className = 'text-xs font-bold px-3 py-1.5 rounded-lg ' + (view === 'list' ? 'bg-indigo-600 text-white' : 'bg-gray-100 text-gray-600');
+        }
         function fillAdminCustomer(sel) {
             const opt = sel.options[sel.selectedIndex];
             if(opt.value) {
@@ -1264,8 +1326,70 @@ def admin_appointments():
     while st <= et:
         timeslots.append(st.strftime("%H:%M"))
         st += timedelta(minutes=30)
-        
-    return render_template_string(ADMIN_APPOINTMENTS_TEMPLATE, appointments=appointments, date_strip=date_strip, selected_date=selected_date, today_str=today_str, services=services, stylists=stylists, customers=customers, timeslots=timeslots, error=request.args.get("error"))
+
+    # ---- 组装日历时间轴所需的数据（类似 Tunai Pro 的排班表：横轴是发型师，纵轴是时间）----
+    PX_PER_MIN = 1.6
+    COLOR_PALETTE = [
+        {"bg": "#eef2ff", "border": "#6366f1", "text": "#4338ca"},  # indigo
+        {"bg": "#ecfeff", "border": "#06b6d4", "text": "#0e7490"},  # cyan
+        {"bg": "#fef3c7", "border": "#f59e0b", "text": "#b45309"},  # amber
+        {"bg": "#fce7f3", "border": "#ec4899", "text": "#be185d"},  # pink
+        {"bg": "#dcfce7", "border": "#22c55e", "text": "#15803d"},  # green
+        {"bg": "#ede9fe", "border": "#8b5cf6", "text": "#6d28d9"},  # violet
+    ]
+
+    def hm_to_min(hm_str):
+        h, m = hm_str.split(":")
+        return int(h) * 60 + int(m)
+
+    day_start_min = hm_to_min(open_time_str)
+    day_end_min = hm_to_min(close_time_str)
+    timeline_height = max(1, (day_end_min - day_start_min)) * PX_PER_MIN
+
+    # 每位发型师一列，顺序固定；用「姓名 (职级)」当作匹配预约记录的 key
+    timeline_columns = []
+    col_key_lookup = {}
+    for i, s in enumerate(stylists):
+        key = f"{s['name']} ({s['title']})"
+        col = {"key": key, "name": s["name"], "title": s["title"], "color": COLOR_PALETTE[i % len(COLOR_PALETTE)]}
+        timeline_columns.append(col)
+        col_key_lookup[key] = col
+
+    # 小时刻度线（每小时一条，顶部对齐营业时间）
+    hour_marks = []
+    h_min = (day_start_min // 60) * 60
+    if h_min < day_start_min:
+        h_min += 60
+    while h_min <= day_end_min:
+        hour_marks.append({"label": f"{h_min // 60:02d}:00", "top": (h_min - day_start_min) * PX_PER_MIN})
+        h_min += 60
+
+    other_col_needed = False
+    timeline_blocks = {col["key"]: [] for col in timeline_columns}
+    for a in appointments:
+        start_hm = a["start_time"].split(" ")[1]
+        end_hm = a["end_time"].split(" ")[1]
+        start_min = hm_to_min(start_hm)
+        end_min = hm_to_min(end_hm)
+        top_px = max(0, (start_min - day_start_min) * PX_PER_MIN)
+        height_px = max(22, (end_min - start_min) * PX_PER_MIN)
+        block = {
+            "id": a["id"], "customer_name": a["customer_name"], "customer_phone": a["customer_phone"],
+            "service_name": a["service_name"], "status": a["status"], "stylist": a["stylist"],
+            "time_range": f"{start_hm} - {end_hm}", "top": top_px, "height": height_px,
+        }
+        col = col_key_lookup.get(a["stylist"])
+        if col:
+            block["color"] = col["color"]
+            timeline_blocks[a["stylist"]].append(block)
+        else:
+            other_col_needed = True
+            block["color"] = {"bg": "#f3f4f6", "border": "#9ca3af", "text": "#4b5563"}
+            timeline_blocks.setdefault("__other__", []).append(block)
+    if other_col_needed:
+        timeline_columns.append({"key": "__other__", "name": "Other", "title": "已删除/未匹配员工", "color": {"bg": "#f3f4f6", "border": "#9ca3af", "text": "#4b5563"}})
+
+    return render_template_string(ADMIN_APPOINTMENTS_TEMPLATE, appointments=appointments, date_strip=date_strip, selected_date=selected_date, today_str=today_str, services=services, stylists=stylists, customers=customers, timeslots=timeslots, error=request.args.get("error"), timeline_columns=timeline_columns, timeline_blocks=timeline_blocks, timeline_height=timeline_height, hour_marks=hour_marks)
 
 @app.route("/admin/appointment/add", methods=["POST"])
 @admin_required
@@ -1411,6 +1535,86 @@ def update_order_remark(id):
 
 @app.route("/admin/order/whatsapp/<int:id>")
 @admin_required
+def build_receipt_pdf(order, items):
+    """用 reportlab 生成一份真正的 PDF 收据（不含员工佣金，只显示员工名字）"""
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib import colors
+    from reportlab.lib.units import mm
+    from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4, topMargin=20*mm, bottomMargin=20*mm, leftMargin=20*mm, rightMargin=20*mm)
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle('title', parent=styles['Heading1'], textColor=colors.HexColor('#4f46e5'))
+    normal = styles['Normal']
+
+    elements = [
+        Paragraph("Dew Hair Salon", title_style),
+        Paragraph("Official Receipt", normal),
+        Spacer(1, 10),
+        Paragraph(f"<b>Order No:</b> {order['order_no']}", normal),
+        Paragraph(f"<b>Date/Time:</b> {order['created_at']}", normal),
+        Paragraph(f"<b>Customer:</b> {order['customer_name']} ({order['customer_phone']})", normal),
+        Paragraph(f"<b>Payment Method:</b> {order['payment_details']}", normal),
+    ]
+    if order.get('remark'):
+        elements.append(Paragraph(f"<b>Remark:</b> {order['remark']}", normal))
+    elements.append(Spacer(1, 14))
+
+    table_data = [["Item", "Staff", "Price (RM)"]]
+    for item in items:
+        staff_names = ", ".join(c["staff_name"] for c in item.get("collaborators", [])) or (item.get("staff_name") or "-")
+        table_data.append([item["item_name"], staff_names, f"{item['price']:.2f}"])
+    table_data.append(["", "Total", f"RM {order['total_amount']:.2f}"])
+
+    tbl = Table(table_data, colWidths=[70*mm, 60*mm, 30*mm])
+    tbl.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#f3f4f6')),
+        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('LINEBELOW', (0, 0), (-1, 0), 0.5, colors.grey),
+        ('LINEBELOW', (0, -2), (-1, -2), 0.5, colors.grey),
+        ('FONTNAME', (0, -1), (-1, -1), 'Helvetica-Bold'),
+        ('ALIGN', (2, 0), (2, -1), 'RIGHT'),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+        ('TOPPADDING', (0, 0), (-1, -1), 6),
+    ]))
+    elements.append(tbl)
+    elements.append(Spacer(1, 20))
+    elements.append(Paragraph("Thank you for visiting us! Hope to see you again soon.", normal))
+
+    doc.build(elements)
+    buf.seek(0)
+    return buf
+
+@app.route("/receipt/<token>/<int:order_id>")
+def customer_receipt_pdf(token, order_id):
+    """顾客专属的 PDF 收据下载链接，不需要登录后台，但要 token 与订单顾客匹配才给看"""
+    with get_db() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute("""
+                SELECT o.*, c.name as customer_name, c.phone as customer_phone, c.token as customer_token
+                FROM orders o JOIN customers c ON o.customer_id = c.id
+                WHERE o.id = %s AND c.token = %s
+            """, (order_id, token))
+            order = cursor.fetchone()
+            if not order:
+                return "Receipt not found", 404
+            cursor.execute("SELECT * FROM order_items WHERE order_id = %s", (order_id,))
+            items = cursor.fetchall()
+            for item in items:
+                cursor.execute("SELECT staff_name FROM order_item_staff WHERE order_item_id = %s", (item["id"],))
+                item["collaborators"] = cursor.fetchall()
+
+    try:
+        pdf_buf = build_receipt_pdf(order, items)
+    except ImportError:
+        return "生成 PDF 需要先在 requirements.txt 里加上 reportlab 这个库，重新部署后再试一次。", 500
+
+    return send_file(pdf_buf, mimetype="application/pdf", as_attachment=False, download_name=f"receipt_{order['order_no']}.pdf")
+
+@app.route("/admin/order/whatsapp/<int:id>")
+@admin_required
 def admin_order_whatsapp(id):
     with get_db() as conn:
         with conn.cursor() as cursor:
@@ -1425,12 +1629,12 @@ def admin_order_whatsapp(id):
             items = cursor.fetchall()
         
     items_str = "\n".join([f"- {item['item_name']}: RM {item['price']:.2f}" for item in items])
-    portal_link = request.host_url.rstrip('/') + f"/customer/{order['customer_token']}"
+    receipt_link = request.host_url.rstrip('/') + f"/receipt/{order['customer_token']}/{order['id']}"
     
     msg = (
         f"🌟 *Dew Hair Salon - Official Invoice* 🌟\n\n"
         f"Hello *{order['customer_name']}*,\n"
-        f"Thank you for visiting us! You can view and download your receipt & profile here:\n\n"
+        f"Thank you for visiting us! Here's your receipt:\n\n"
         f"🧾 *Order No:* {order['order_no']}\n"
         f"📅 *Date:* {order['created_at']}\n\n"
         f"*Purchased Items:*\n{items_str}\n\n"
@@ -1440,7 +1644,7 @@ def admin_order_whatsapp(id):
     if order['remark']:
         msg += f"📝 *Remark:* {order['remark']}\n"
         
-    msg += f"\n🔗 *My Member Portal & Download Receipt:*\n{portal_link}\n\nHope to see you again soon!"
+    msg += f"\n📄 *Download your PDF Receipt here:*\n{receipt_link}\n\nHope to see you again soon!"
     
     phone = "".join(filter(str.isdigit, order['customer_phone']))
     if phone.startswith('0'):
@@ -1478,13 +1682,13 @@ def admin_order_invoice(id):
             <p><strong>Payment Method:</strong> {{ order.payment_details }}</p>
             {% if order.remark %}<p><strong>Remark:</strong> <span style="color:#d97706;">{{ order.remark }}</span></p>{% endif %}
             <hr style="border:0;border-top:1px solid #eee;margin:15px 0;">
-            <h3 style="font-size:16px;margin-bottom:8px;">Items Purchased & Staff Commission</h3>
+            <h3 style="font-size:16px;margin-bottom:8px;">Items Purchased</h3>
             <table style="width:100%;border-collapse:collapse;font-size:14px;margin-bottom:15px;">
                 <thead>
                     <tr style="border-bottom:1px solid #ddd;background:#f9fafb;">
                         <th style="text-align:left;padding:6px;">Item Name</th>
                         <th style="text-align:left;padding:6px;">Staff</th>
-                        <th style="text-align:right;padding:6px;">Price & Commission</th>
+                        <th style="text-align:right;padding:6px;">Price</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -1494,10 +1698,10 @@ def admin_order_invoice(id):
                         <td style="padding:6px;color:#4f46e5;">
                             {% if item.collaborators %}
                                 {% for c in item.collaborators %}
-                                    <div>{{ c.staff_name }} <span style="color:green;font-size:11px;">(RM {{ "%.2f"|format(c.commission_amount) }})</span></div>
+                                    <div>{{ c.staff_name }}</div>
                                 {% endfor %}
                             {% elif item.staff_name %}
-                                <div>{{ item.staff_name }} {% if item.commission > 0 %}<span style="color:green;font-size:11px;">(RM {{ "%.2f"|format(item.commission) }})</span>{% endif %}</div>
+                                <div>{{ item.staff_name }}</div>
                             {% else %}-{% endif %}
                         </td>
                         <td style="text-align:right;padding:6px;">
@@ -1510,8 +1714,8 @@ def admin_order_invoice(id):
             <div style="text-align:right;font-size:18px;font-weight:bold;margin-bottom:20px;">
                 Total Amount: <span style="color:#dc2626;">RM {{ "%.2f"|format(order.total_amount) }}</span>
             </div>
-            <div style="display:flex;gap:10px;">
-                <button onclick="window.print()" style="flex:1;padding:12px;background:#10b981;color:white;border:none;border-radius:6px;font-weight:bold;cursor:pointer;">📥 下载/打印收据 (PDF)</button>
+            <div style="display:flex;gap:10px;flex-wrap:wrap;">
+                <a href="/receipt/{{ order.customer_token }}/{{ order.id }}" target="_blank" style="flex:1;text-align:center;padding:12px;background:#dc2626;color:white;text-decoration:none;border-radius:6px;font-weight:bold;">📄 查看真正的 PDF 收据</a>
                 <a href="/admin/order/whatsapp/{{ order.id }}" target="_blank" style="flex:1;text-align:center;padding:12px;background:#25d366;color:white;text-decoration:none;border-radius:6px;font-weight:bold;">💬 发送 WhatsApp</a>
                 <a href="/admin/orders" style="padding:12px 15px;background:#4f46e5;color:white;text-decoration:none;border-radius:6px;font-weight:bold;">返回</a>
             </div>
@@ -2090,119 +2294,141 @@ def checkout():
 
 BOOKING_CALENDAR_TEMPLATE = """
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Dew Hair Salon - 在线预约日历</title>
+    <title>Dew Hair Salon - Book an Appointment</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
     <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { font-family: 'Inter', sans-serif; }
+        .step-badge { display:inline-flex; align-items:center; justify-content:center; width:26px; height:26px; border-radius:9999px; background:#4f46e5; color:white; font-weight:700; font-size:13px; }
+    </style>
 </head>
-<body class="bg-gray-50 min-h-screen p-4 md:p-8">
-    <div class="max-w-3xl mx-auto bg-white p-6 md:p-8 rounded-xl shadow-md">
-        <h2 class="text-3xl font-extrabold text-center text-indigo-600 mb-2">Dew Hair Salon 在线预约</h2>
-        <p class="text-center text-sm text-gray-500 mb-6">营业时间: {{ open_time }} - {{ close_time }} (马来西亚时间)</p>
-        
+<body class="bg-gray-50 min-h-screen">
+    <div class="max-w-2xl mx-auto p-4 md:p-8">
+        <!-- Header -->
+        <div class="text-center mb-6">
+            <h1 class="text-2xl md:text-3xl font-extrabold text-gray-900">Dew Hair Salon</h1>
+            <p class="text-sm text-gray-500 mt-1">Book your appointment online in under a minute</p>
+            <p class="text-xs text-gray-400 mt-1">Open {{ open_time }} - {{ close_time }} (Malaysia time)</p>
+        </div>
+
         {% if error %}
-        <div class="mb-4 p-3 bg-red-100 text-red-700 rounded text-sm font-bold">{{ error }}</div>
+        <div class="mb-4 p-3 bg-red-50 border border-red-200 text-red-700 rounded-lg text-sm font-semibold">⚠️ {{ error }}</div>
         {% endif %}
-        
-        <form action="/book" method="POST" id="bookingForm">
-            <div class="mb-5">
-                <label class="block text-sm font-bold mb-2">1. 选择美发服务项目</label>
+
+        <form action="/book" method="POST" id="bookingForm" class="space-y-5">
+
+            <!-- Step 1: Service -->
+            <div class="bg-white rounded-2xl shadow-sm border border-gray-100 p-5">
+                <div class="flex items-center gap-2 mb-4">
+                    <span class="step-badge">1</span>
+                    <h2 class="font-bold text-gray-900">Choose a service</h2>
+                </div>
                 <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     {% for item in services %}
-                    <label class="border rounded-lg p-3 cursor-pointer hover:border-indigo-600 flex items-center justify-between">
+                    <label class="group border-2 border-gray-100 rounded-xl p-3 cursor-pointer hover:border-indigo-400 has-[:checked]:border-indigo-600 has-[:checked]:bg-indigo-50 flex items-center justify-between transition">
                         <div>
-                            <div class="font-bold">{{ item.name }}</div>
-                            <div class="text-xs text-gray-500">耗时: {{ item.duration }}分钟</div>
+                            <div class="font-semibold text-gray-900">{{ item.name }}</div>
+                            <div class="text-xs text-gray-400">{{ item.duration }} min</div>
                         </div>
-                        <div class="text-right">
-                            <span class="text-indigo-600 font-bold">RM {{ "%.2f"|format(item.price) }}</span>
-                            <input type="radio" name="service_id" value="{{ item.id }}" class="ml-2" required {% if loop.first %}checked{% endif %}>
+                        <div class="text-right flex items-center gap-2">
+                            <span class="text-indigo-600 font-bold text-sm">RM {{ "%.2f"|format(item.price) }}</span>
+                            <input type="radio" name="service_id" value="{{ item.id }}" class="accent-indigo-600 w-4 h-4" required {% if loop.first %}checked{% endif %}>
                         </div>
                     </label>
                     {% endfor %}
                 </div>
             </div>
 
-            <div class="mb-5">
-                <label class="block text-sm font-bold mb-2">2. 选择专属发型师</label>
+            <!-- Step 2: Stylist -->
+            <div class="bg-white rounded-2xl shadow-sm border border-gray-100 p-5">
+                <div class="flex items-center gap-2 mb-4">
+                    <span class="step-badge">2</span>
+                    <h2 class="font-bold text-gray-900">Pick your stylist</h2>
+                </div>
                 <div class="grid grid-cols-3 gap-3">
                     {% for st in stylists %}
-                    <label class="border rounded-lg p-3 text-center cursor-pointer hover:border-indigo-600">
-                        <div class="font-bold text-gray-800">{{ st.name }}</div>
-                        <div class="text-xs text-gray-500 mb-2">{{ st.title }}</div>
-                        <input type="radio" name="stylist" value="{{ st.name }} ({{ st.title }})" required {% if loop.first %}checked{% endif %}>
+                    <label class="border-2 border-gray-100 rounded-xl p-3 text-center cursor-pointer hover:border-indigo-400 has-[:checked]:border-indigo-600 has-[:checked]:bg-indigo-50 transition">
+                        <div class="w-9 h-9 mx-auto mb-1 rounded-full bg-indigo-100 text-indigo-600 font-bold flex items-center justify-center text-sm">{{ st.name[0] }}</div>
+                        <div class="font-semibold text-gray-900 text-sm">{{ st.name }}</div>
+                        <div class="text-[11px] text-gray-400 mb-1">{{ st.title }}</div>
+                        <input type="radio" name="stylist" value="{{ st.name }} ({{ st.title }})" class="accent-indigo-600 w-4 h-4" required {% if loop.first %}checked{% endif %}>
                     </label>
                     {% endfor %}
                 </div>
             </div>
 
-            <div class="mb-5">
-                <div class="flex justify-between items-center mb-2">
-                    <label class="block text-sm font-bold">3. 选择预约日期</label>
-                    <input type="date" name="booking_date" id="booking_date" value="{{ selected_date }}" min="{{ today_str }}" class="border rounded px-2 py-1 text-sm text-indigo-600 font-bold" onchange="selectDateCard(this.value)">
+            <!-- Step 3: Date -->
+            <div class="bg-white rounded-2xl shadow-sm border border-gray-100 p-5">
+                <div class="flex items-center justify-between mb-4">
+                    <div class="flex items-center gap-2">
+                        <span class="step-badge">3</span>
+                        <h2 class="font-bold text-gray-900">Select a date</h2>
+                    </div>
+                    <input type="date" name="booking_date" id="booking_date" value="{{ selected_date }}" min="{{ today_str }}" class="border border-gray-200 rounded-lg px-2 py-1.5 text-sm text-indigo-600 font-semibold" onchange="selectDateCard(this.value)">
                 </div>
-                <div class="flex gap-2 overflow-x-auto pb-2">
+                <div class="flex gap-2 overflow-x-auto pb-1">
                     {% for d in date_strip %}
-                    <div onclick="selectDateCard('{{ d.date_str }}')" class="date-card flex-shrink-0 w-24 p-3 rounded-xl border text-center cursor-pointer transition {% if d.date_str == selected_date %}bg-indigo-600 text-white border-indigo-600 shadow-md font-bold{% else %}bg-white text-gray-700 hover:border-indigo-400{% endif %}" data-date="{{ d.date_str }}">
-                        <div class="text-xs opacity-80">{{ d.weekday }}</div>
-                        <div class="text-sm font-bold my-1">{{ d.display_date }}</div>
-                        <div class="text-[10px] opacity-70">{{ d.year }}</div>
+                    <div onclick="selectDateCard('{{ d.date_str }}')" class="date-card flex-shrink-0 w-20 p-2.5 rounded-xl border-2 text-center cursor-pointer transition {% if d.date_str == selected_date %}bg-indigo-600 text-white border-indigo-600 shadow-md font-bold{% else %}bg-white text-gray-700 border-gray-100 hover:border-indigo-300{% endif %}" data-date="{{ d.date_str }}">
+                        <div class="text-[10px] opacity-80 uppercase tracking-wide">{{ d.weekday }}</div>
+                        <div class="text-sm font-bold my-0.5">{{ d.display_date }}</div>
+                        <div class="text-[9px] opacity-60">{{ d.year }}</div>
                     </div>
                     {% endfor %}
                 </div>
             </div>
 
-            <div class="mb-6">
-                <label class="block text-sm font-bold mb-2">4. 选择时间段</label>
-                <div class="grid grid-cols-4 sm:grid-cols-6 gap-2 max-h-48 overflow-y-auto p-2 border rounded bg-gray-50">
+            <!-- Step 4: Time -->
+            <div class="bg-white rounded-2xl shadow-sm border border-gray-100 p-5">
+                <div class="flex items-center gap-2 mb-4">
+                    <span class="step-badge">4</span>
+                    <h2 class="font-bold text-gray-900">Pick a time slot</h2>
+                </div>
+                <div class="grid grid-cols-4 sm:grid-cols-6 gap-2 max-h-48 overflow-y-auto p-1">
                     {% for t in timeslots %}
-                    <label class="border bg-white text-center py-2 rounded cursor-pointer hover:bg-indigo-600 hover:text-white transition text-sm font-medium">
+                    <label class="border-2 border-gray-100 bg-white text-center py-2 rounded-lg cursor-pointer hover:border-indigo-400 has-[:checked]:bg-indigo-600 has-[:checked]:border-indigo-600 has-[:checked]:text-white transition text-sm font-medium">
                         <input type="radio" name="booking_time" value="{{ t }}" class="sr-only peer" required>
-                        <span class="peer-checked:font-bold">{{ t }}</span>
+                        <span>{{ t }}</span>
                     </label>
                     {% endfor %}
                 </div>
             </div>
 
-            <div class="border-t pt-4 grid grid-cols-1 sm:grid-cols-2 gap-4 mb-6">
-                <div>
-                    <label class="block text-sm font-bold mb-1">您的姓名</label>
-                    <input type="text" name="customer_name" class="w-full border rounded p-3" required>
+            <!-- Step 5: Your details -->
+            <div class="bg-white rounded-2xl shadow-sm border border-gray-100 p-5">
+                <div class="flex items-center gap-2 mb-4">
+                    <span class="step-badge">5</span>
+                    <h2 class="font-bold text-gray-900">Your details</h2>
                 </div>
-                <div>
-                    <label class="block text-sm font-bold mb-1">您的电话号码</label>
-                    <input type="text" name="customer_phone" class="w-full border rounded p-3" required>
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <div>
+                        <label class="block text-xs font-semibold text-gray-500 mb-1">Full name</label>
+                        <input type="text" name="customer_name" placeholder="e.g. Sarah Tan" class="w-full border border-gray-200 rounded-lg p-3 text-sm focus:border-indigo-500 focus:outline-none" required>
+                    </div>
+                    <div>
+                        <label class="block text-xs font-semibold text-gray-500 mb-1">Phone number</label>
+                        <input type="text" name="customer_phone" placeholder="e.g. 012-3456789" class="w-full border border-gray-200 rounded-lg p-3 text-sm focus:border-indigo-500 focus:outline-none" required>
+                    </div>
                 </div>
             </div>
 
-            <button class="w-full bg-indigo-600 text-white font-bold py-3.5 rounded-lg text-lg hover:bg-indigo-700 shadow-md">确认提交预约</button>
+            <button class="w-full bg-indigo-600 text-white font-bold py-4 rounded-xl text-base hover:bg-indigo-700 shadow-md shadow-indigo-200 transition">Confirm Booking</button>
         </form>
     </div>
     <script>
-        document.querySelectorAll('input[name="booking_time"]').forEach(input => {
-            input.addEventListener('change', function() {
-                document.querySelectorAll('input[name="booking_time"]').forEach(i => {
-                    i.parentElement.classList.remove('bg-indigo-600', 'text-white', 'border-indigo-600');
-                    i.parentElement.classList.add('bg-white', 'text-gray-800');
-                });
-                if(this.checked) {
-                    this.parentElement.classList.remove('bg-white', 'text-gray-800');
-                    this.parentElement.classList.add('bg-indigo-600', 'text-white', 'border-indigo-600');
-                }
-            });
-        });
-
         function selectDateCard(dateStr) {
             document.getElementById('booking_date').value = dateStr;
             document.querySelectorAll('.date-card').forEach(card => {
                 if(card.getAttribute('data-date') === dateStr) {
                     card.classList.add('bg-indigo-600', 'text-white', 'border-indigo-600', 'shadow-md', 'font-bold');
-                    card.classList.remove('bg-white', 'text-gray-700');
+                    card.classList.remove('bg-white', 'text-gray-700', 'border-gray-100');
                 } else {
                     card.classList.remove('bg-indigo-600', 'text-white', 'border-indigo-600', 'shadow-md', 'font-bold');
-                    card.classList.add('bg-white', 'text-gray-700');
+                    card.classList.add('bg-white', 'text-gray-700', 'border-gray-100');
                 }
             });
         }
@@ -2224,9 +2450,9 @@ def index():
             for i in range(10):
                 d = start_loop + timedelta(days=i)
                 d_str = d.strftime("%Y-%m-%d")
-                wd_map = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+                wd_map = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
                 wd_str = wd_map[d.weekday()]
-                if d_str == today_str: wd_str = "今天"
+                if d_str == today_str: wd_str = "Today"
                 date_strip.append({"date_str": d_str, "display_date": d.strftime("%m-%d"), "year": d.strftime("%Y"), "weekday": wd_str})
                 
             cursor.execute("SELECT * FROM services WHERE category_type != 'Packages'")
@@ -2260,12 +2486,12 @@ def book_appointment():
             # 校验休息日
             cursor.execute("SELECT * FROM holidays WHERE date_str = %s", (b_date,))
             if cursor.fetchone():
-                return redirect(url_for("index", date=b_date, error="该日期为临时闭店日，无法预约！"))
+                return redirect(url_for("index", date=b_date, error="We're closed on this date. Please pick another day."))
             
             dt_obj = datetime.strptime(b_date, "%Y-%m-%d")
             closed_wd = get_setting("closed_weekdays", "1")
             if closed_wd != '-1' and dt_obj.weekday() == int(closed_wd):
-                return redirect(url_for("index", date=b_date, error="该日期为门店固定休息日，无法预约！"))
+                return redirect(url_for("index", date=b_date, error="We're closed on this day of the week. Please pick another day."))
                 
             cursor.execute("SELECT duration FROM services WHERE id = %s", (service_id,))
             srv = cursor.fetchone()
@@ -2278,7 +2504,7 @@ def book_appointment():
 
             # 检查该发型师这个时间段是否已被预约
             if find_conflicting_appointment(cursor, stylist, start_str, end_str):
-                return redirect(url_for("index", date=b_date, error="该发型师这个时间段刚好已经有其他预约了，请换个时间或发型师！"))
+                return redirect(url_for("index", date=b_date, error="This stylist already has a booking at that time. Please choose another time or stylist."))
             
             cursor.execute("SELECT id, token FROM customers WHERE phone = %s", (c_phone,))
             cust = cursor.fetchone()
@@ -2304,7 +2530,7 @@ def customer_portal(token):
         with conn.cursor() as cursor:
             cursor.execute("SELECT * FROM customers WHERE token = %s", (token,))
             cust = cursor.fetchone()
-            if not cust: return "会员页面不存在或链接错误", 404
+            if not cust: return "Member page not found or invalid link", 404
             
             cursor.execute("""
                 SELECT a.*, s.name as service_name, s.price FROM appointments a 
@@ -2322,59 +2548,62 @@ def customer_portal(token):
             
     return render_template_string("""
         <!DOCTYPE html>
-        <html lang="zh-CN">
+        <html lang="en">
         <head>
             <meta charset="UTF-8">
             <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>{{ cust.name }} 的会员中心 - Dew Hair Salon</title>
+            <title>{{ cust.name }}'s Member Center - Dew Hair Salon</title>
+            <link rel="preconnect" href="https://fonts.googleapis.com">
+            <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
             <script src="https://cdn.tailwindcss.com"></script>
+            <style>body { font-family: 'Inter', sans-serif; }</style>
         </head>
         <body class="bg-gray-50 min-h-screen p-4 md:p-8">
-            <div class="max-w-3xl mx-auto space-y-6">
-                <div class="bg-white p-6 rounded-xl shadow flex justify-between items-center">
+            <div class="max-w-2xl mx-auto space-y-5">
+                <div class="bg-white p-6 rounded-2xl shadow-sm border border-gray-100 flex justify-between items-center">
                     <div>
-                        <h2 class="text-2xl font-bold text-indigo-600">✨ {{ cust.name }} 的专属会员中心</h2>
-                        <p class="text-sm text-gray-500">电话: {{ cust.phone }}</p>
+                        <h1 class="text-xl font-extrabold text-gray-900">✨ Welcome, {{ cust.name }}</h1>
+                        <p class="text-sm text-gray-400">{{ cust.phone }}</p>
                     </div>
                     <div class="text-right">
-                        <div class="text-xs text-gray-400">账户 Credit 余额</div>
-                        <div class="text-2xl font-bold text-green-600">RM {{ "%.2f"|format(cust.credits) }}</div>
+                        <div class="text-xs text-gray-400">Credit Balance</div>
+                        <div class="text-xl font-bold text-green-600">RM {{ "%.2f"|format(cust.credits) }}</div>
                     </div>
                 </div>
 
-                <div class="bg-white p-6 rounded-xl shadow">
-                    <h3 class="text-lg font-bold mb-3 text-gray-800">📅 我的预约记录</h3>
-                    <div class="space-y-3">
+                <div class="bg-white p-6 rounded-2xl shadow-sm border border-gray-100">
+                    <h2 class="font-bold text-gray-900 mb-3">📅 My Appointments</h2>
+                    <div class="space-y-2">
                         {% for a in appointments %}
-                        <div class="border p-4 rounded-lg flex justify-between items-center bg-gray-50">
+                        <div class="border border-gray-100 p-3.5 rounded-xl flex justify-between items-center bg-gray-50">
                             <div>
-                                <div class="font-bold text-indigo-600">{{ a.service_name }}</div>
-                                <div class="text-sm text-gray-600">时间: {{ a.start_time }} ~ {{ a.end_time.split()[1] }}</div>
-                                <div class="text-xs text-gray-500">发型师: {{ a.stylist }}</div>
+                                <div class="font-semibold text-indigo-600 text-sm">{{ a.service_name }}</div>
+                                <div class="text-xs text-gray-500">{{ a.start_time }} - {{ a.end_time.split()[1] }}</div>
+                                <div class="text-xs text-gray-400">Stylist: {{ a.stylist }}</div>
                             </div>
-                            <span class="bg-green-100 text-green-800 px-3 py-1 rounded-full text-xs font-bold">{{ a.status }}</span>
+                            <span class="bg-green-100 text-green-700 px-2.5 py-1 rounded-full text-[11px] font-bold">{{ a.status }}</span>
                         </div>
                         {% else %}
-                        <p class="text-gray-400 text-sm">暂无预约记录</p>
+                        <p class="text-gray-400 text-sm">No appointments yet</p>
                         {% endfor %}
                     </div>
                 </div>
 
-                <div class="bg-white p-6 rounded-xl shadow">
-                    <h3 class="text-lg font-bold mb-3 text-gray-800">🧾 我的消费与充值历史</h3>
+                <div class="bg-white p-6 rounded-2xl shadow-sm border border-gray-100">
+                    <h2 class="font-bold text-gray-900 mb-3">🧾 Purchase History</h2>
                     <table class="w-full text-left text-sm">
-                        <thead><tr class="border-b bg-gray-50"><th class="p-2">单号</th><th class="p-2">时间</th><th class="p-2">项目</th><th class="p-2">金额</th><th class="p-2">支付</th></tr></thead>
+                        <thead><tr class="border-b border-gray-100 text-gray-500 text-xs"><th class="p-2">Order No</th><th class="p-2">Date</th><th class="p-2">Item</th><th class="p-2">Amount</th><th class="p-2">Payment</th></tr></thead>
                         <tbody>
                             {% for o in orders %}
-                            <tr class="border-b {% if o.status == 'VOID' %}line-through text-gray-400 bg-red-50{% endif %}">
-                                <td class="p-2 font-bold">{{ o.order_no }}</td>
+                            <tr class="border-b border-gray-50 {% if o.status == 'VOID' %}line-through text-gray-400 bg-red-50{% endif %}">
+                                <td class="p-2 font-semibold">{{ o.order_no }}</td>
                                 <td class="p-2">{{ o.created_at }}</td>
                                 <td class="p-2">{{ o.item_name }}</td>
-                                <td class="p-2 font-bold">RM {{ "%.2f"|format(o.price) }}</td>
-                                <td class="p-2">{{ '已作废' if o.status == 'VOID' else o.payment_details }}</td>
+                                <td class="p-2 font-semibold">RM {{ "%.2f"|format(o.price) }}</td>
+                                <td class="p-2">{{ 'Voided' if o.status == 'VOID' else o.payment_details }}</td>
                             </tr>
                             {% else %}
-                            <tr><td colspan="5" class="p-3 text-gray-400">暂无消费订单</td></tr>
+                            <tr><td colspan="5" class="p-3 text-gray-400">No orders yet</td></tr>
                             {% endfor %}
                         </tbody>
                     </table>
