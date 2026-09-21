@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 from pytz import timezone
 from functools import wraps
 from flask import (
-    Flask, request, redirect, url_for, session, render_template_string, jsonify, send_file
+    Flask, request, redirect, url_for, session, render_template_string, jsonify, send_file, g
 )
 
 app = Flask(__name__)
@@ -33,12 +33,23 @@ def get_current_date():
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
 def get_db():
-    if DATABASE_URL:
-        # 兼容 PgBouncer 事务模式及参数解析
-        conn = psycopg2.connect(DATABASE_URL, cursor_factory=psycopg2.extras.RealDictCursor)
-    else:
-        conn = psycopg2.connect("dbname=salon user=postgres password=postgres", cursor_factory=psycopg2.extras.RealDictCursor)
-    return conn
+    # 同一次请求内复用同一个数据库连接，避免每次调用都新开一个连接却从不关闭（连接泄漏）
+    if "db_conn" not in g:
+        if DATABASE_URL:
+            # 兼容 PgBouncer 事务模式及参数解析
+            g.db_conn = psycopg2.connect(DATABASE_URL, cursor_factory=psycopg2.extras.RealDictCursor)
+        else:
+            g.db_conn = psycopg2.connect("dbname=salon user=postgres password=postgres", cursor_factory=psycopg2.extras.RealDictCursor)
+    return g.db_conn
+
+@app.teardown_appcontext
+def close_db_connection(exception=None):
+    conn = g.pop("db_conn", None)
+    if conn is not None:
+        try:
+            conn.close()
+        except Exception:
+            pass
 
 def init_db():
     with get_db() as conn:
@@ -200,7 +211,8 @@ def init_db():
                     cursor.execute("INSERT INTO service_categories (name) VALUES (%s) ON CONFLICT (name) DO NOTHING", (row["sub_category"],))
         conn.commit()
 
-init_db()
+with app.app_context():
+    init_db()
 
 def admin_required(f):
     @wraps(f)
