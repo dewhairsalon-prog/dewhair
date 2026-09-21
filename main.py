@@ -6,6 +6,7 @@ import hmac
 import json
 import io
 import urllib.parse
+import urllib.request
 from datetime import datetime, timedelta
 from pytz import timezone
 from functools import wraps
@@ -66,6 +67,12 @@ def init_db():
             cursor.execute("ALTER TABLE stylists ADD COLUMN IF NOT EXISTS rank_name TEXT DEFAULT ''")
             cursor.execute("ALTER TABLE services ADD COLUMN IF NOT EXISTS stock_qty INTEGER")
             cursor.execute("ALTER TABLE services ADD COLUMN IF NOT EXISTS bookable_online BOOLEAN DEFAULT TRUE")
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS service_categories (
+                    id SERIAL PRIMARY KEY,
+                    name TEXT UNIQUE NOT NULL
+                );
+            """)
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS staff_ranks (
                     id SERIAL PRIMARY KEY,
@@ -181,6 +188,16 @@ def init_db():
                 ]
                 for r in default_ranks:
                     cursor.execute("INSERT INTO staff_ranks (name, commission_type, commission_value) VALUES (%s, %s, %s)", r)
+
+            # 首次升级时，把现有服务里已经用过的分类标签迁移进正式的分类表
+            cursor.execute("SELECT COUNT(*) FROM service_categories")
+            if cursor.fetchone()["count"] == 0:
+                cursor.execute("""
+                    SELECT DISTINCT sub_category FROM services
+                    WHERE sub_category IS NOT NULL AND sub_category NOT IN ('Services', 'Packages', 'Products')
+                """)
+                for row in cursor.fetchall():
+                    cursor.execute("INSERT INTO service_categories (name) VALUES (%s) ON CONFLICT (name) DO NOTHING", (row["sub_category"],))
         conn.commit()
 
 init_db()
@@ -199,6 +216,17 @@ def get_setting(key, default):
             cursor.execute("SELECT value FROM settings WHERE key = %s", (key,))
             row = cursor.fetchone()
             return row["value"] if row else default
+
+def get_int_setting(key, default, minimum=None):
+    """安全读取数字类设置：值损坏/非数字时回退默认值，minimum 可防止 0 或负数造成死循环等问题"""
+    raw = get_setting(key, str(default))
+    try:
+        value = int(raw)
+    except (ValueError, TypeError):
+        value = default
+    if minimum is not None:
+        value = max(minimum, value)
+    return value
 
 def find_conflicting_appointment(cursor, stylist, start_str, end_str, exclude_id=None, buffer_minutes=0):
     """检查某发型师在这个时间段是否已经有其他预约（含缓冲时间，缓冲时间内也视为冲突）"""
@@ -244,6 +272,7 @@ LAYOUT_TEMPLATE = """
                 <a href="/admin/staff" class="hover:bg-indigo-700 px-2 py-1 rounded">员工与佣金管理</a>
                 <a href="/admin/reports" class="hover:bg-indigo-700 px-2 py-1 rounded">90天报表</a>
                 <a href="/admin/payroll" class="hover:bg-indigo-700 px-2 py-1 rounded">薪资报表</a>
+                <a href="/admin/settings" class="hover:bg-indigo-700 px-2 py-1 rounded">⚙️ 设置</a>
                 <a href="/" target="_blank" class="bg-green-600 px-2 py-1 rounded hover:bg-green-700">🔗 顾客预约页面</a>
                 <a href="/admin/logout" class="bg-red-500 px-2 py-1 rounded hover:bg-red-600">退出</a>
             </div>
@@ -296,10 +325,8 @@ def admin_dashboard():
         with conn.cursor() as cursor:
             cursor.execute("SELECT * FROM services ORDER BY category_type, sub_category")
             services = cursor.fetchall()
-            existing_categories = sorted(set(
-                s["sub_category"] for s in services
-                if s["sub_category"] and s["sub_category"] not in ("Services", "Packages", "Products")
-            ))
+            cursor.execute("SELECT name FROM service_categories ORDER BY name")
+            existing_categories = [r["name"] for r in cursor.fetchall()]
             cursor.execute("SELECT * FROM stylists ORDER BY id DESC")
             stylists = cursor.fetchall()
             cursor.execute("SELECT * FROM holidays ORDER BY date_str DESC")
@@ -368,70 +395,13 @@ def admin_dashboard():
                     </table>
                 </div>
 
-                <!-- 营业与休息日设置 -->
-                <div class="bg-white p-6 rounded shadow">
-                    <h2 class="text-xl font-bold mb-4">营业与预约设置</h2>
-                    <form action="/admin/settings/update" method="POST" class="grid grid-cols-2 md:grid-cols-4 gap-4 items-end mb-4">
-                        <div>
-                            <label class="block text-sm font-medium">开门时间</label>
-                            <input type="time" name="open_time" value="{{ open_time }}" class="w-full border rounded p-2" required>
-                        </div>
-                        <div>
-                            <label class="block text-sm font-medium">关门时间</label>
-                            <input type="time" name="close_time" value="{{ close_time }}" class="w-full border rounded p-2" required>
-                        </div>
-                        <div>
-                            <label class="block text-sm font-medium">每周固定休息日</label>
-                            <select name="closed_weekdays" class="w-full border rounded p-2">
-                                <option value="0" {% if closed_wd == '0' %}selected{% endif %}>周日休息</option>
-                                <option value="1" {% if closed_wd == '1' %}selected{% endif %}>周一休息</option>
-                                <option value="2" {% if closed_wd == '2' %}selected{% endif %}>周二休息</option>
-                                <option value="-1" {% if closed_wd == '-1' %}selected{% endif %}>无固定休息日</option>
-                            </select>
-                        </div>
-                        <div>
-                            <label class="block text-sm font-medium">预约时段间隔 (分钟)</label>
-                            <select name="slot_interval_minutes" class="w-full border rounded p-2">
-                                <option value="15" {% if slot_interval == '15' %}selected{% endif %}>每 15 分钟</option>
-                                <option value="30" {% if slot_interval == '30' %}selected{% endif %}>每 30 分钟</option>
-                                <option value="45" {% if slot_interval == '45' %}selected{% endif %}>每 45 分钟</option>
-                                <option value="60" {% if slot_interval == '60' %}selected{% endif %}>每 60 分钟</option>
-                            </select>
-                        </div>
-                        <div>
-                            <label class="block text-sm font-medium">顾客最多可提前预约 (天)</label>
-                            <input type="number" name="max_advance_days" value="{{ max_advance_days }}" min="1" class="w-full border rounded p-2" placeholder="例如: 30">
-                        </div>
-                        <div>
-                            <label class="block text-sm font-medium">同一发型师预约间缓冲时间 (分钟)</label>
-                            <input type="number" name="buffer_minutes" value="{{ buffer_minutes }}" min="0" class="w-full border rounded p-2" placeholder="例如: 10 (0 = 不留缓冲)">
-                        </div>
-                        <div>
-                            <button class="w-full bg-indigo-600 text-white font-bold py-2 rounded hover:bg-indigo-700">保存设置</button>
-                        </div>
-                    </form>
-
-                    <hr class="my-4">
-                    <h3 class="font-bold mb-2">添加特定临时休息日</h3>
-                    <form action="/admin/holiday/add" method="POST" class="flex gap-2">
-                        <input type="date" name="date_str" class="border rounded p-2" required>
-                        <input type="text" name="reason" placeholder="休息原因 (如: 公共假期/员工培训)" class="border rounded p-2 flex-grow">
-                        <button class="bg-red-500 text-white px-4 py-2 rounded font-bold hover:bg-red-600">添加闭店日</button>
-                    </form>
-                    
-                    <div class="mt-4">
-                        <h4 class="text-sm font-bold text-gray-600 mb-2">已设定的临时休息日：</h4>
-                        <div class="flex flex-wrap gap-2">
-                            {% for h in holidays %}
-                            <span class="bg-red-50 text-red-700 px-3 py-1 rounded border border-red-200 text-sm flex items-center gap-2">
-                                {{ h.date_str }} ({{ h.reason }})
-                                <a href="/admin/holiday/delete/{{ h.id }}" class="font-bold hover:text-red-900">×</a>
-                            </span>
-                            {% else %}
-                            <span class="text-gray-400 text-sm">暂无临时闭店日</span>
-                            {% endfor %}
-                        </div>
+                <!-- 营业与休息日设置：已移到统一设置页 -->
+                <div class="bg-white p-6 rounded shadow flex items-center justify-between">
+                    <div>
+                        <h2 class="text-xl font-bold">营业时间、预约规则、分类与通知</h2>
+                        <p class="text-sm text-gray-500 mt-1">开门时间、休息日、预约间隔、服务分类、新预约通知等都整合到了统一的设置页面</p>
                     </div>
+                    <a href="/admin/settings" class="bg-indigo-600 text-white px-4 py-2.5 rounded-lg text-sm font-bold hover:bg-indigo-700 flex-shrink-0">⚙️ 前往设置</a>
                 </div>
 
                 <!-- 员工团队管理 -->
@@ -836,7 +806,10 @@ def update_settings():
     open_time = request.form.get("open_time", "10:00")
     close_time = request.form.get("close_time", "20:00")
     closed_weekdays = request.form.get("closed_weekdays", "1")
-    slot_interval_minutes = request.form.get("slot_interval_minutes", "30")
+    try:
+        slot_interval_minutes = str(max(5, int(request.form.get("slot_interval_minutes", "30") or 30)))
+    except (ValueError, TypeError):
+        slot_interval_minutes = "30"
     max_advance_days = request.form.get("max_advance_days", "30") or "30"
     buffer_minutes = request.form.get("buffer_minutes", "0") or "0"
     with get_db() as conn:
@@ -848,7 +821,7 @@ def update_settings():
             cursor.execute("INSERT INTO settings (key, value) VALUES ('max_advance_days', %s) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", (max_advance_days,))
             cursor.execute("INSERT INTO settings (key, value) VALUES ('buffer_minutes', %s) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", (buffer_minutes,))
             conn.commit()
-    return redirect(url_for("admin_dashboard"))
+    return redirect(url_for("admin_settings"))
 
 @app.route("/admin/holiday/add", methods=["POST"])
 @admin_required
@@ -862,7 +835,7 @@ def add_holiday():
                 conn.commit()
             except:
                 conn.rollback()
-    return redirect(url_for("admin_dashboard"))
+    return redirect(url_for("admin_settings"))
 
 @app.route("/admin/holiday/delete/<int:id>")
 @admin_required
@@ -871,7 +844,245 @@ def delete_holiday(id):
         with conn.cursor() as cursor:
             cursor.execute("DELETE FROM holidays WHERE id = %s", (id,))
             conn.commit()
-    return redirect(url_for("admin_dashboard"))
+    return redirect(url_for("admin_settings"))
+
+@app.route("/admin/categories/add", methods=["POST"])
+@admin_required
+def admin_categories_add():
+    name = (request.form.get("name") or "").strip()
+    with get_db() as conn:
+        with conn.cursor() as cursor:
+            if name:
+                try:
+                    cursor.execute("INSERT INTO service_categories (name) VALUES (%s)", (name,))
+                    conn.commit()
+                except:
+                    conn.rollback()
+    return redirect(url_for("admin_settings"))
+
+@app.route("/admin/categories/update/<int:id>", methods=["POST"])
+@admin_required
+def admin_categories_update(id):
+    new_name = (request.form.get("name") or "").strip()
+    with get_db() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT name FROM service_categories WHERE id = %s", (id,))
+            old = cursor.fetchone()
+            if old and new_name:
+                cursor.execute("UPDATE service_categories SET name = %s WHERE id = %s", (new_name, id))
+                # 同步更新所有用到这个旧分类名的服务
+                cursor.execute("UPDATE services SET sub_category = %s WHERE sub_category = %s", (new_name, old["name"]))
+                conn.commit()
+    return redirect(url_for("admin_settings"))
+
+@app.route("/admin/categories/delete/<int:id>")
+@admin_required
+def admin_categories_delete(id):
+    with get_db() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute("DELETE FROM service_categories WHERE id = %s", (id,))
+            conn.commit()
+    return redirect(url_for("admin_settings"))
+
+def send_telegram_notification(message):
+    """通过 Telegram Bot 发送新预约通知，没配置 token/chat_id 时静默跳过"""
+    bot_token = get_setting("telegram_bot_token", "")
+    chat_id = get_setting("telegram_chat_id", "")
+    if not bot_token or not chat_id:
+        return False
+    try:
+        url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+        data = urllib.parse.urlencode({"chat_id": chat_id, "text": message}).encode()
+        req = urllib.request.Request(url, data=data)
+        urllib.request.urlopen(req, timeout=5)
+        return True
+    except Exception:
+        return False
+
+@app.route("/admin/notifications/update", methods=["POST"])
+@admin_required
+def admin_notifications_update():
+    bot_token = request.form.get("telegram_bot_token", "").strip()
+    chat_id = request.form.get("telegram_chat_id", "").strip()
+    with get_db() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute("INSERT INTO settings (key, value) VALUES ('telegram_bot_token', %s) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", (bot_token,))
+            cursor.execute("INSERT INTO settings (key, value) VALUES ('telegram_chat_id', %s) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", (chat_id,))
+            conn.commit()
+    return redirect(url_for("admin_settings"))
+
+@app.route("/admin/notifications/test")
+@admin_required
+def admin_notifications_test():
+    ok = send_telegram_notification("🔔 Dew Hair Salon: 这是一条测试通知，如果你收到这条消息，说明通知设置成功了！")
+    return redirect(url_for("admin_settings", test_result="ok" if ok else "fail"))
+
+@app.route("/admin/set-lang/<lang>")
+@admin_required
+def admin_set_lang(lang):
+    next_url = request.args.get("next") or url_for("admin_dashboard")
+    resp = redirect(next_url)
+    resp.set_cookie("admin_lang", "en" if lang == "en" else "zh", max_age=60*60*24*365)
+    return resp
+
+SETTINGS_TEMPLATE = """
+    <div class="space-y-6">
+        {% if test_result == 'ok' %}
+        <div class="p-3 bg-green-50 border border-green-200 text-green-700 rounded-lg text-sm font-bold">✅ 测试通知已发送，请检查你的 Telegram</div>
+        {% elif test_result == 'fail' %}
+        <div class="p-3 bg-red-50 border border-red-200 text-red-700 rounded-lg text-sm font-bold">⚠️ 发送失败，请检查 Bot Token 和 Chat ID 是否正确</div>
+        {% endif %}
+
+        <!-- 营业时间与预约规则 -->
+        <div class="bg-white p-6 rounded-2xl shadow-sm border border-gray-100">
+            <h2 class="text-lg font-bold text-gray-900 mb-4">🕐 营业时间与预约规则</h2>
+            <form action="/admin/settings/update" method="POST" class="grid grid-cols-2 md:grid-cols-4 gap-4 items-end">
+                <div>
+                    <label class="block text-xs font-semibold text-gray-500 mb-1">开门时间</label>
+                    <input type="time" name="open_time" value="{{ open_time }}" class="w-full border border-gray-200 rounded-lg p-2 text-sm" required>
+                </div>
+                <div>
+                    <label class="block text-xs font-semibold text-gray-500 mb-1">关门时间</label>
+                    <input type="time" name="close_time" value="{{ close_time }}" class="w-full border border-gray-200 rounded-lg p-2 text-sm" required>
+                </div>
+                <div>
+                    <label class="block text-xs font-semibold text-gray-500 mb-1">每周固定休息日</label>
+                    <select name="closed_weekdays" class="w-full border border-gray-200 rounded-lg p-2 text-sm">
+                        <option value="0" {% if closed_wd == '0' %}selected{% endif %}>周日休息</option>
+                        <option value="1" {% if closed_wd == '1' %}selected{% endif %}>周一休息</option>
+                        <option value="2" {% if closed_wd == '2' %}selected{% endif %}>周二休息</option>
+                        <option value="-1" {% if closed_wd == '-1' %}selected{% endif %}>无固定休息日</option>
+                    </select>
+                </div>
+                <div>
+                    <label class="block text-xs font-semibold text-gray-500 mb-1">预约时段间隔</label>
+                    <select name="slot_interval_minutes" class="w-full border border-gray-200 rounded-lg p-2 text-sm">
+                        <option value="15" {% if slot_interval == '15' %}selected{% endif %}>每 15 分钟</option>
+                        <option value="30" {% if slot_interval == '30' %}selected{% endif %}>每 30 分钟</option>
+                        <option value="45" {% if slot_interval == '45' %}selected{% endif %}>每 45 分钟</option>
+                        <option value="60" {% if slot_interval == '60' %}selected{% endif %}>每 60 分钟</option>
+                    </select>
+                </div>
+                <div>
+                    <label class="block text-xs font-semibold text-gray-500 mb-1">顾客最多可提前预约 (天)</label>
+                    <input type="number" name="max_advance_days" value="{{ max_advance_days }}" min="1" class="w-full border border-gray-200 rounded-lg p-2 text-sm">
+                </div>
+                <div>
+                    <label class="block text-xs font-semibold text-gray-500 mb-1">同发型师预约缓冲 (分钟)</label>
+                    <input type="number" name="buffer_minutes" value="{{ buffer_minutes }}" min="0" class="w-full border border-gray-200 rounded-lg p-2 text-sm">
+                </div>
+                <div>
+                    <button class="w-full bg-indigo-600 text-white font-bold py-2 rounded-lg hover:bg-indigo-700 text-sm">保存</button>
+                </div>
+            </form>
+
+            <hr class="my-5 border-gray-100">
+            <h3 class="font-bold text-sm text-gray-800 mb-2">临时休息日</h3>
+            <form action="/admin/holiday/add" method="POST" class="flex gap-2 mb-3">
+                <input type="date" name="date_str" class="border border-gray-200 rounded-lg p-2 text-sm" required>
+                <input type="text" name="reason" placeholder="休息原因 (如: 公共假期)" class="border border-gray-200 rounded-lg p-2 text-sm flex-grow">
+                <button class="bg-red-500 text-white px-4 py-2 rounded-lg font-bold text-sm hover:bg-red-600">添加闭店日</button>
+            </form>
+            <div class="flex flex-wrap gap-2">
+                {% for h in holidays %}
+                <span class="bg-red-50 text-red-700 px-3 py-1 rounded-full border border-red-200 text-xs flex items-center gap-2">
+                    {{ h.date_str }} ({{ h.reason }})
+                    <a href="/admin/holiday/delete/{{ h.id }}" class="font-bold hover:text-red-900">×</a>
+                </span>
+                {% else %}
+                <span class="text-gray-400 text-xs">暂无临时闭店日</span>
+                {% endfor %}
+            </div>
+        </div>
+
+        <!-- 服务分类管理 -->
+        <div class="bg-white p-6 rounded-2xl shadow-sm border border-gray-100">
+            <h2 class="text-lg font-bold text-gray-900 mb-1">🏷️ 服务分类管理</h2>
+            <p class="text-xs text-gray-500 mb-4">这里的分类会出现在 POS 收银台的分类标签页，也是添加服务时可以选的分类标签</p>
+            <div class="flex flex-wrap gap-2 mb-4">
+                {% for c in categories %}
+                <div class="flex items-center gap-1 bg-gray-50 border border-gray-100 rounded-full pl-3 pr-1 py-1">
+                    <form action="/admin/categories/update/{{ c.id }}" method="POST" class="flex items-center">
+                        <input type="text" name="name" value="{{ c.name }}" class="bg-transparent text-sm font-semibold w-20 focus:outline-none" onchange="this.form.requestSubmit()">
+                    </form>
+                    <a href="/admin/categories/delete/{{ c.id }}" onclick="return confirm('删除分类 {{ c.name }}？已使用该分类的服务不会被删除，只是分类标签会变回类型默认值。')" class="text-red-400 hover:text-red-600 font-bold text-xs px-1">×</a>
+                </div>
+                {% else %}
+                <span class="text-gray-400 text-sm">暂无分类，先在下面添加一个</span>
+                {% endfor %}
+            </div>
+            <form action="/admin/categories/add" method="POST" class="flex gap-2">
+                <input type="text" name="name" placeholder="新分类名称，如: 美甲" class="border border-gray-200 rounded-lg p-2 text-sm flex-grow" required>
+                <button class="bg-indigo-600 text-white px-4 py-2 rounded-lg font-bold text-sm hover:bg-indigo-700">添加分类</button>
+            </form>
+        </div>
+
+        <!-- 新预约通知 -->
+        <div class="bg-white p-6 rounded-2xl shadow-sm border border-gray-100">
+            <h2 class="text-lg font-bold text-gray-900 mb-1">🔔 新预约通知 (Telegram)</h2>
+            <p class="text-xs text-gray-500 mb-4">配置好之后，每次有顾客在线上预约成功，你会立刻收到 Telegram 消息。免费、即时，不需要额外付费服务。</p>
+            <form action="/admin/notifications/update" method="POST" class="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
+                <div>
+                    <label class="block text-xs font-semibold text-gray-500 mb-1">Telegram Bot Token</label>
+                    <input type="text" name="telegram_bot_token" value="{{ telegram_bot_token }}" placeholder="123456:ABC-DEF..." class="w-full border border-gray-200 rounded-lg p-2 text-sm">
+                </div>
+                <div>
+                    <label class="block text-xs font-semibold text-gray-500 mb-1">Telegram Chat ID</label>
+                    <input type="text" name="telegram_chat_id" value="{{ telegram_chat_id }}" placeholder="例如: 123456789" class="w-full border border-gray-200 rounded-lg p-2 text-sm">
+                </div>
+                <div class="sm:col-span-2 flex gap-2">
+                    <button class="bg-indigo-600 text-white px-4 py-2 rounded-lg font-bold text-sm hover:bg-indigo-700">保存</button>
+                    <a href="/admin/notifications/test" class="bg-gray-100 text-gray-700 px-4 py-2 rounded-lg font-bold text-sm hover:bg-gray-200">发送测试通知</a>
+                </div>
+            </form>
+            <details class="text-xs text-gray-500">
+                <summary class="cursor-pointer font-semibold text-indigo-600">还没有 Bot Token？点这里看怎么获取（3 分钟搞定）</summary>
+                <ol class="list-decimal list-inside mt-2 space-y-1">
+                    <li>在 Telegram 搜索 <b>@BotFather</b>，点 Start，发送 <code>/newbot</code>，按提示取个名字，完成后会给你一个 Token（一长串数字和字母），复制填到上面</li>
+                    <li>再搜索 <b>@userinfobot</b>，点 Start，它会回复你的 Chat ID（一串数字），复制填到上面</li>
+                    <li>保存后点"发送测试通知"，Telegram 上找到你刚创建的机器人，应该会收到一条测试消息</li>
+                </ol>
+            </details>
+        </div>
+
+        <!-- 语言 -->
+        <div class="bg-white p-6 rounded-2xl shadow-sm border border-gray-100">
+            <h2 class="text-lg font-bold text-gray-900 mb-1">🌐 语言</h2>
+            <p class="text-xs text-gray-500 mb-3">顾客预约页面固定为英文；后台导航栏和这个设置页面支持中英文切换，其余内部页面暂时仍是中文。</p>
+            <div class="flex gap-2">
+                <a href="/admin/set-lang/zh?next={{ request.path }}" class="px-4 py-2 rounded-lg text-sm font-bold {% if admin_lang == 'zh' %}bg-indigo-600 text-white{% else %}bg-gray-100 text-gray-600{% endif %}">中文</a>
+                <a href="/admin/set-lang/en?next={{ request.path }}" class="px-4 py-2 rounded-lg text-sm font-bold {% if admin_lang == 'en' %}bg-indigo-600 text-white{% else %}bg-gray-100 text-gray-600{% endif %}">English</a>
+            </div>
+        </div>
+    </div>
+"""
+
+@app.route("/admin/settings")
+@admin_required
+def admin_settings():
+    open_time = get_setting("open_time", "10:00")
+    close_time = get_setting("close_time", "20:00")
+    closed_wd = get_setting("closed_weekdays", "1")
+    slot_interval = get_setting("slot_interval_minutes", "30")
+    max_advance_days = get_setting("max_advance_days", "30")
+    buffer_minutes = get_setting("buffer_minutes", "0")
+    telegram_bot_token = get_setting("telegram_bot_token", "")
+    telegram_chat_id = get_setting("telegram_chat_id", "")
+    with get_db() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT * FROM holidays ORDER BY date_str DESC")
+            holidays = cursor.fetchall()
+            cursor.execute("SELECT * FROM service_categories ORDER BY name")
+            categories = cursor.fetchall()
+    return render_template_string(
+        LAYOUT_TEMPLATE.replace("{% block content %}{% endblock %}", SETTINGS_TEMPLATE),
+        open_time=open_time, close_time=close_time, closed_wd=closed_wd,
+        slot_interval=slot_interval, max_advance_days=max_advance_days, buffer_minutes=buffer_minutes,
+        holidays=holidays, categories=categories,
+        telegram_bot_token=telegram_bot_token, telegram_chat_id=telegram_chat_id,
+        test_result=request.args.get("test_result"),
+        admin_lang=request.cookies.get("admin_lang", "zh"),
+    )
 
 @app.route("/admin/service/add", methods=["POST"])
 @admin_required
@@ -890,6 +1101,8 @@ def add_service():
                 INSERT INTO services (name, category_type, sub_category, price, duration, credit_value, stock_qty, bookable_online) 
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             """, (name, cat, sub_category, price, duration, credit_value, stock_qty, bookable_online))
+            if sub_category and sub_category not in ("Services", "Packages", "Products"):
+                cursor.execute("INSERT INTO service_categories (name) VALUES (%s) ON CONFLICT (name) DO NOTHING", (sub_category,))
             conn.commit()
     return redirect(url_for("admin_dashboard"))
 
@@ -1128,6 +1341,7 @@ ADMIN_APPOINTMENTS_TEMPLATE = """
                 <a href="/admin/staff" class="hover:bg-indigo-700 px-2 py-1 rounded">员工与佣金管理</a>
                 <a href="/admin/reports" class="hover:bg-indigo-700 px-2 py-1 rounded">90天报表</a>
                 <a href="/admin/payroll" class="hover:bg-indigo-700 px-2 py-1 rounded">薪资报表</a>
+                <a href="/admin/settings" class="hover:bg-indigo-700 px-2 py-1 rounded">⚙️ 设置</a>
                 <a href="/" target="_blank" class="bg-green-600 px-2 py-1 rounded hover:bg-green-700">🔗 顾客预约页面</a>
                 <a href="/admin/logout" class="bg-red-500 px-2 py-1 rounded hover:bg-red-600">退出</a>
             </div>
@@ -1392,7 +1606,7 @@ def admin_appointments():
         
     open_time_str = get_setting("open_time", "10:00")
     close_time_str = get_setting("close_time", "20:00")
-    slot_interval_min = int(get_setting("slot_interval_minutes", "30") or 30)
+    slot_interval_min = get_int_setting("slot_interval_minutes", 30, minimum=5)
     timeslots = []
     st = datetime.strptime(open_time_str, "%H:%M")
     et = datetime.strptime(close_time_str, "%H:%M")
@@ -1407,6 +1621,7 @@ def admin_appointments():
         {"bg": "#dcfce7", "border": "#22c55e", "text": "#15803d"},  # green
         {"bg": "#ede9fe", "border": "#8b5cf6", "text": "#6d28d9"},  # violet
     ]
+    PX_PER_MIN = 1.6
 
     def hm_to_min(hm_str):
         h, m = hm_str.split(":")
@@ -1481,7 +1696,7 @@ def admin_add_appointment():
             start_str = start_dt.strftime("%Y-%m-%d %H:%M")
             end_str = end_dt.strftime("%Y-%m-%d %H:%M")
 
-            if find_conflicting_appointment(cursor, stylist, start_str, end_str, buffer_minutes=int(get_setting("buffer_minutes", "0") or 0)):
+            if find_conflicting_appointment(cursor, stylist, start_str, end_str, buffer_minutes=get_int_setting("buffer_minutes", 0, minimum=0)):
                 return redirect(url_for("admin_appointments", date=b_date, error="该发型师这个时间段已经有预约了，请换个时间或发型师！"))
             
             cursor.execute("SELECT id FROM customers WHERE phone = %s", (c_phone,))
@@ -1627,6 +1842,7 @@ def build_receipt_pdf(order, items):
         Paragraph(f"<b>Date/Time:</b> {order['created_at']}", normal),
         Paragraph(f"<b>Customer:</b> {order['customer_name']} ({order['customer_phone']})", normal),
         Paragraph(f"<b>Payment Method:</b> {order['payment_details']}", normal),
+        Paragraph(f"<b>Credit Balance:</b> RM {order.get('customer_credits', 0.0):.2f}", normal),
     ]
     if order.get('remark'):
         elements.append(Paragraph(f"<b>Remark:</b> {order['remark']}", normal))
@@ -1669,7 +1885,7 @@ def customer_receipt_pdf(token, order_id):
     with get_db() as conn:
         with conn.cursor() as cursor:
             cursor.execute("""
-                SELECT o.*, c.name as customer_name, c.phone as customer_phone, c.token as customer_token
+                SELECT o.*, c.name as customer_name, c.phone as customer_phone, c.token as customer_token, c.credits as customer_credits
                 FROM orders o JOIN customers c ON o.customer_id = c.id
                 WHERE o.id = %s AND c.token = %s
             """, (order_id, token))
@@ -1695,7 +1911,7 @@ def admin_order_whatsapp(id):
     with get_db() as conn:
         with conn.cursor() as cursor:
             cursor.execute("""
-                SELECT o.*, c.name as customer_name, c.phone as customer_phone, c.token as customer_token 
+                SELECT o.*, c.name as customer_name, c.phone as customer_phone, c.token as customer_token, c.credits as customer_credits
                 FROM orders o JOIN customers c ON o.customer_id = c.id WHERE o.id = %s
             """, (id,))
             order = cursor.fetchone()
@@ -1716,6 +1932,7 @@ def admin_order_whatsapp(id):
         f"*Purchased Items:*\n{items_str}\n\n"
         f"💰 *Total Amount:* RM {order['total_amount']:.2f}\n"
         f"💳 *Payment Method:* {order['payment_details']}\n"
+        f"💎 *Credit Balance:* RM {order['customer_credits']:.2f}\n"
     )
     if order['remark']:
         msg += f"📝 *Remark:* {order['remark']}\n"
@@ -1735,7 +1952,7 @@ def admin_order_invoice(id):
     with get_db() as conn:
         with conn.cursor() as cursor:
             cursor.execute("""
-                SELECT o.*, c.name as customer_name, c.phone as customer_phone, c.token as customer_token 
+                SELECT o.*, c.name as customer_name, c.phone as customer_phone, c.token as customer_token, c.credits as customer_credits
                 FROM orders o JOIN customers c ON o.customer_id = c.id WHERE o.id = %s
             """, (id,))
             order = cursor.fetchone()
@@ -1756,6 +1973,7 @@ def admin_order_invoice(id):
             <p><strong>Date/Time:</strong> {{ order.created_at }}</p>
             <p><strong>Customer:</strong> {{ order.customer_name }} ({{ order.customer_phone }})</p>
             <p><strong>Payment Method:</strong> {{ order.payment_details }}</p>
+            <p><strong>Credit Balance:</strong> <span style="color:#16a34a;font-weight:bold;">RM {{ "%.2f"|format(order.customer_credits) }}</span></p>
             {% if order.remark %}<p><strong>Remark:</strong> <span style="color:#d97706;">{{ order.remark }}</span></p>{% endif %}
             <hr style="border:0;border-top:1px solid #eee;margin:15px 0;">
             <h3 style="font-size:16px;margin-bottom:8px;">Items Purchased</h3>
@@ -2144,6 +2362,10 @@ def admin_pos():
                             <option value="Credit Balance Deduct">Credit Balance Deduct (储值余额扣款)</option>
                         </select>
                     </div>
+                    <div class="mb-4">
+                        <label class="block text-xs font-semibold text-gray-500 mb-1">备注 (会显示在单据上，选填)</label>
+                        <input type="text" name="remark" placeholder="例如: 顾客要求下次换用敏感肌染发剂" class="w-full border border-gray-200 rounded-lg p-2 text-sm">
+                    </div>
                     <button class="w-full bg-green-600 text-white font-bold py-3 rounded-xl hover:bg-green-700 shadow-sm">完成收款与记账</button>
                 </form>
             </div>
@@ -2350,6 +2572,7 @@ def checkout():
         name = request.form.get("customer_name")
         phone = request.form.get("customer_phone_input") or request.form.get("customer_phone")
         pay_method = request.form.get("payment_method")
+        remark = (request.form.get("remark") or "").strip()
         subtotal = sum(item["price"] for item in cart_data)
         discount_percent = float(request.form.get("discount_percent", 0) or 0)
         discount_percent = max(0.0, min(100.0, discount_percent))
@@ -2388,7 +2611,7 @@ def checkout():
                     current_credits -= total
                     cursor.execute("UPDATE customers SET credits = %s WHERE id = %s", (current_credits, cust_id))
                     
-                cursor.execute("INSERT INTO orders (order_no, customer_id, total_amount, payment_details, status, created_at, discount_percent) VALUES (%s, %s, %s, %s, 'NORMAL', %s, %s) RETURNING id", (order_no, cust_id, total, pay_method, current_time_str, discount_percent))
+                cursor.execute("INSERT INTO orders (order_no, customer_id, total_amount, payment_details, status, created_at, discount_percent, remark) VALUES (%s, %s, %s, %s, 'NORMAL', %s, %s, %s) RETURNING id", (order_no, cust_id, total, pay_method, current_time_str, discount_percent, remark))
                 order_id = cursor.fetchone()["id"]
                 
                 for item in cart_data:
@@ -2603,8 +2826,8 @@ def index():
             
     open_time_str = get_setting("open_time", "10:00")
     close_time_str = get_setting("close_time", "20:00")
-    slot_interval_min = int(get_setting("slot_interval_minutes", "30") or 30)
-    max_advance_days = int(get_setting("max_advance_days", "30") or 30)
+    slot_interval_min = get_int_setting("slot_interval_minutes", 30, minimum=5)
+    max_advance_days = get_int_setting("max_advance_days", 30, minimum=1)
     max_date_str = (datetime.now(MY_TZ) + timedelta(days=max_advance_days)).strftime("%Y-%m-%d")
     timeslots = []
     st = datetime.strptime(open_time_str, "%H:%M")
@@ -2637,13 +2860,14 @@ def book_appointment():
             if closed_wd != '-1' and dt_obj.weekday() == int(closed_wd):
                 return redirect(url_for("index", date=b_date, error="We're closed on this day of the week. Please pick another day."))
 
-            max_advance_days = int(get_setting("max_advance_days", "30") or 30)
+            max_advance_days = get_int_setting("max_advance_days", 30, minimum=1)
             if dt_obj.date() > (datetime.now(MY_TZ).date() + timedelta(days=max_advance_days)):
                 return redirect(url_for("index", date=b_date, error=f"Bookings can only be made up to {max_advance_days} days in advance."))
                 
-            cursor.execute("SELECT duration FROM services WHERE id = %s", (service_id,))
+            cursor.execute("SELECT duration, name FROM services WHERE id = %s", (service_id,))
             srv = cursor.fetchone()
             duration = srv["duration"] if srv else 30
+            service_name = srv["name"] if srv else "Unknown service"
             
             start_dt = datetime.strptime(f"{b_date} {b_time}", "%Y-%m-%d %H:%M")
             end_dt = start_dt + timedelta(minutes=duration)
@@ -2651,7 +2875,7 @@ def book_appointment():
             end_str = end_dt.strftime("%Y-%m-%d %H:%M")
 
             # 检查该发型师这个时间段是否已被预约（含缓冲时间）
-            buffer_minutes = int(get_setting("buffer_minutes", "0") or 0)
+            buffer_minutes = get_int_setting("buffer_minutes", 0, minimum=0)
             if find_conflicting_appointment(cursor, stylist, start_str, end_str, buffer_minutes=buffer_minutes):
                 return redirect(url_for("index", date=b_date, error="This stylist already has a booking at that time. Please choose another time or stylist."))
             
@@ -2670,7 +2894,10 @@ def book_appointment():
             cursor.execute("INSERT INTO appointments (customer_id, service_id, stylist, start_time, end_time) VALUES (%s, %s, %s, %s, %s) RETURNING id", (cust_id, service_id, stylist, start_str, end_str))
             app_id = cursor.fetchone()["id"]
             conn.commit()
-            
+
+    send_telegram_notification(
+        f"🔔 New Booking!\n👤 {c_name} ({c_phone})\n💇 {service_name}\n💈 {stylist}\n🕐 {start_str} - {end_str.split(' ')[1]}"
+    )
     return redirect(url_for("customer_portal", token=cust_token))
 
 @app.route("/customer/<token>")
@@ -2789,4 +3016,5 @@ def customer_cancel_appointment(token, appointment_id):
     return redirect(url_for("customer_portal", token=token))
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port, debug=False)
