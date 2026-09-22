@@ -911,22 +911,55 @@ def send_telegram_notification(message):
     except Exception:
         return False
 
+def send_email_notification(subject, message):
+    """通过 Gmail SMTP 发送新预约通知邮件，没配置邮箱信息时静默跳过"""
+    gmail_address = get_setting("notify_gmail_address", "")
+    gmail_app_password = get_setting("notify_gmail_app_password", "")
+    to_email = get_setting("notify_to_email", "") or gmail_address
+    if not gmail_address or not gmail_app_password or not to_email:
+        return False
+    try:
+        import smtplib
+        from email.mime.text import MIMEText
+        msg = MIMEText(message, "plain", "utf-8")
+        msg["Subject"] = subject
+        msg["From"] = gmail_address
+        msg["To"] = to_email
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=8) as server:
+            server.login(gmail_address, gmail_app_password)
+            server.sendmail(gmail_address, [to_email], msg.as_string())
+        return True
+    except Exception:
+        return False
+
+def notify_new_booking(message):
+    """新预约通知：Telegram 和邮件哪个配置了就发哪个，两个都配置了就都发"""
+    sent_telegram = send_telegram_notification(message)
+    sent_email = send_email_notification("🔔 Dew Hair Salon - New Booking", message)
+    return sent_telegram or sent_email
+
 @app.route("/admin/notifications/update", methods=["POST"])
 @admin_required
 def admin_notifications_update():
     bot_token = request.form.get("telegram_bot_token", "").strip()
     chat_id = request.form.get("telegram_chat_id", "").strip()
+    gmail_address = request.form.get("notify_gmail_address", "").strip()
+    gmail_app_password = request.form.get("notify_gmail_app_password", "").strip()
+    to_email = request.form.get("notify_to_email", "").strip()
     with get_db() as conn:
         with conn.cursor() as cursor:
             cursor.execute("INSERT INTO settings (key, value) VALUES ('telegram_bot_token', %s) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", (bot_token,))
             cursor.execute("INSERT INTO settings (key, value) VALUES ('telegram_chat_id', %s) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", (chat_id,))
+            cursor.execute("INSERT INTO settings (key, value) VALUES ('notify_gmail_address', %s) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", (gmail_address,))
+            cursor.execute("INSERT INTO settings (key, value) VALUES ('notify_gmail_app_password', %s) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", (gmail_app_password,))
+            cursor.execute("INSERT INTO settings (key, value) VALUES ('notify_to_email', %s) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", (to_email,))
             conn.commit()
     return redirect(url_for("admin_settings"))
 
 @app.route("/admin/notifications/test")
 @admin_required
 def admin_notifications_test():
-    ok = send_telegram_notification("🔔 Dew Hair Salon: 这是一条测试通知，如果你收到这条消息，说明通知设置成功了！")
+    ok = notify_new_booking("🔔 Dew Hair Salon: 这是一条测试通知，如果你收到这条消息，说明通知设置成功了！")
     return redirect(url_for("admin_settings", test_result="ok" if ok else "fail"))
 
 @app.route("/admin/set-lang/<lang>")
@@ -1031,28 +1064,58 @@ SETTINGS_TEMPLATE = """
 
         <!-- 新预约通知 -->
         <div class="bg-white p-6 rounded-2xl shadow-sm border border-gray-100">
-            <h2 class="text-lg font-bold text-gray-900 mb-1">🔔 新预约通知 (Telegram)</h2>
-            <p class="text-xs text-gray-500 mb-4">配置好之后，每次有顾客在线上预约成功，你会立刻收到 Telegram 消息。免费、即时，不需要额外付费服务。</p>
-            <form action="/admin/notifications/update" method="POST" class="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
+            <h2 class="text-lg font-bold text-gray-900 mb-1">🔔 新预约通知</h2>
+            <p class="text-xs text-gray-500 mb-4">配置好 Telegram 或邮箱（可以只用一种，也可以两个都开），每次有顾客在线上预约成功，你会立刻收到通知。都是免费的，不需要额外付费服务。</p>
+            <form action="/admin/notifications/update" method="POST" class="space-y-4 mb-3">
                 <div>
-                    <label class="block text-xs font-semibold text-gray-500 mb-1">Telegram Bot Token</label>
-                    <input type="text" name="telegram_bot_token" value="{{ telegram_bot_token }}" placeholder="123456:ABC-DEF..." class="w-full border border-gray-200 rounded-lg p-2 text-sm">
+                    <h3 class="text-sm font-bold text-gray-700 mb-2">方式一：Telegram（推荐，最快）</h3>
+                    <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        <div>
+                            <label class="block text-xs font-semibold text-gray-500 mb-1">Telegram Bot Token</label>
+                            <input type="text" name="telegram_bot_token" value="{{ telegram_bot_token }}" placeholder="123456:ABC-DEF..." class="w-full border border-gray-200 rounded-lg p-2 text-sm">
+                        </div>
+                        <div>
+                            <label class="block text-xs font-semibold text-gray-500 mb-1">Telegram Chat ID</label>
+                            <input type="text" name="telegram_chat_id" value="{{ telegram_chat_id }}" placeholder="例如: 123456789" class="w-full border border-gray-200 rounded-lg p-2 text-sm">
+                        </div>
+                    </div>
                 </div>
                 <div>
-                    <label class="block text-xs font-semibold text-gray-500 mb-1">Telegram Chat ID</label>
-                    <input type="text" name="telegram_chat_id" value="{{ telegram_chat_id }}" placeholder="例如: 123456789" class="w-full border border-gray-200 rounded-lg p-2 text-sm">
+                    <h3 class="text-sm font-bold text-gray-700 mb-2">方式二：邮箱通知（用你自己的 Gmail 发送）</h3>
+                    <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                        <div>
+                            <label class="block text-xs font-semibold text-gray-500 mb-1">发送用 Gmail 邮箱</label>
+                            <input type="email" name="notify_gmail_address" value="{{ notify_gmail_address }}" placeholder="yourshop@gmail.com" class="w-full border border-gray-200 rounded-lg p-2 text-sm">
+                        </div>
+                        <div>
+                            <label class="block text-xs font-semibold text-gray-500 mb-1">Gmail 应用专用密码</label>
+                            <input type="text" name="notify_gmail_app_password" value="{{ notify_gmail_app_password }}" placeholder="16 位应用密码" class="w-full border border-gray-200 rounded-lg p-2 text-sm">
+                        </div>
+                        <div>
+                            <label class="block text-xs font-semibold text-gray-500 mb-1">接收通知的邮箱 (留空则发到上面那个)</label>
+                            <input type="email" name="notify_to_email" value="{{ notify_to_email }}" placeholder="me@example.com" class="w-full border border-gray-200 rounded-lg p-2 text-sm">
+                        </div>
+                    </div>
                 </div>
-                <div class="sm:col-span-2 flex gap-2">
+                <div class="flex gap-2">
                     <button class="bg-indigo-600 text-white px-4 py-2 rounded-lg font-bold text-sm hover:bg-indigo-700">保存</button>
                     <a href="/admin/notifications/test" class="bg-gray-100 text-gray-700 px-4 py-2 rounded-lg font-bold text-sm hover:bg-gray-200">发送测试通知</a>
                 </div>
             </form>
-            <details class="text-xs text-gray-500">
-                <summary class="cursor-pointer font-semibold text-indigo-600">还没有 Bot Token？点这里看怎么获取（3 分钟搞定）</summary>
+            <details class="text-xs text-gray-500 mb-2">
+                <summary class="cursor-pointer font-semibold text-indigo-600">还没有 Telegram Bot Token？点这里看怎么获取（3 分钟搞定）</summary>
                 <ol class="list-decimal list-inside mt-2 space-y-1">
                     <li>在 Telegram 搜索 <b>@BotFather</b>，点 Start，发送 <code>/newbot</code>，按提示取个名字，完成后会给你一个 Token（一长串数字和字母），复制填到上面</li>
                     <li>再搜索 <b>@userinfobot</b>，点 Start，它会回复你的 Chat ID（一串数字），复制填到上面</li>
                     <li>保存后点"发送测试通知"，Telegram 上找到你刚创建的机器人，应该会收到一条测试消息</li>
+                </ol>
+            </details>
+            <details class="text-xs text-gray-500">
+                <summary class="cursor-pointer font-semibold text-indigo-600">还没有 Gmail 应用专用密码？点这里看怎么获取</summary>
+                <ol class="list-decimal list-inside mt-2 space-y-1">
+                    <li>用你的 Gmail 账号登录 <b>myaccount.google.com/security</b>，先确认已经开启"两步验证"（没开的话先开，不然拿不到应用密码）</li>
+                    <li>搜索 "应用专用密码" (App Passwords) 这个设置项，点进去创建一个新的，名字随便填（比如 "Salon"）</li>
+                    <li>会生成一个 16 位的密码（没有空格那种形式），复制填到上面的"Gmail 应用专用密码"栏——注意不是你平时登录 Gmail 的密码</li>
                 </ol>
             </details>
         </div>
@@ -1080,6 +1143,9 @@ def admin_settings():
     buffer_minutes = get_setting("buffer_minutes", "0")
     telegram_bot_token = get_setting("telegram_bot_token", "")
     telegram_chat_id = get_setting("telegram_chat_id", "")
+    notify_gmail_address = get_setting("notify_gmail_address", "")
+    notify_gmail_app_password = get_setting("notify_gmail_app_password", "")
+    notify_to_email = get_setting("notify_to_email", "")
     with get_db() as conn:
         with conn.cursor() as cursor:
             cursor.execute("SELECT * FROM holidays ORDER BY date_str DESC")
@@ -1092,6 +1158,7 @@ def admin_settings():
         slot_interval=slot_interval, max_advance_days=max_advance_days, buffer_minutes=buffer_minutes,
         holidays=holidays, categories=categories,
         telegram_bot_token=telegram_bot_token, telegram_chat_id=telegram_chat_id,
+        notify_gmail_address=notify_gmail_address, notify_gmail_app_password=notify_gmail_app_password, notify_to_email=notify_to_email,
         test_result=request.args.get("test_result"),
         admin_lang=request.cookies.get("admin_lang", "zh"),
     )
@@ -1154,13 +1221,15 @@ def delete_service(id):
 @admin_required
 def admin_customers():
     search_query = request.args.get("q", "").strip()
+    selected_id = request.args.get("id", type=int)
     with get_db() as conn:
         with conn.cursor() as cursor:
             if search_query:
                 cursor.execute("""
                     SELECT c.*, 
                            (SELECT COUNT(*) FROM appointments WHERE customer_id = c.id) as app_count,
-                           (SELECT COUNT(*) FROM orders WHERE customer_id = c.id AND status = 'NORMAL') as order_count
+                           (SELECT COUNT(*) FROM orders WHERE customer_id = c.id AND status = 'NORMAL') as order_count,
+                           (SELECT MAX(created_at) FROM orders WHERE customer_id = c.id AND status = 'NORMAL') as last_order_at
                     FROM customers c 
                     WHERE c.name ILIKE %s OR c.phone ILIKE %s
                     ORDER BY c.id DESC
@@ -1169,75 +1238,167 @@ def admin_customers():
                 cursor.execute("""
                     SELECT c.*, 
                            (SELECT COUNT(*) FROM appointments WHERE customer_id = c.id) as app_count,
-                           (SELECT COUNT(*) FROM orders WHERE customer_id = c.id AND status = 'NORMAL') as order_count
+                           (SELECT COUNT(*) FROM orders WHERE customer_id = c.id AND status = 'NORMAL') as order_count,
+                           (SELECT MAX(created_at) FROM orders WHERE customer_id = c.id AND status = 'NORMAL') as last_order_at
                     FROM customers c 
                     ORDER BY c.id DESC
                 """)
             customers = cursor.fetchall()
-            
+
+            if not selected_id and customers:
+                selected_id = customers[0]["id"]
+
+            selected_customer = None
+            appointments = []
+            orders = []
+            if selected_id:
+                cursor.execute("SELECT * FROM customers WHERE id = %s", (selected_id,))
+                selected_customer = cursor.fetchone()
+                if selected_customer:
+                    cursor.execute("""
+                        SELECT a.*, s.name as service_name FROM appointments a
+                        JOIN services s ON a.service_id = s.id
+                        WHERE a.customer_id = %s
+                        ORDER BY a.start_time DESC LIMIT 10
+                    """, (selected_id,))
+                    appointments = cursor.fetchall()
+                    cursor.execute("""
+                        SELECT o.*, i.item_name, i.price FROM orders o 
+                        LEFT JOIN order_items i ON o.id = i.order_id 
+                        WHERE o.customer_id = %s 
+                        ORDER BY o.created_at DESC LIMIT 15
+                    """, (selected_id,))
+                    orders = cursor.fetchall()
+
     return render_template_string(LAYOUT_TEMPLATE.replace("{% block content %}{% endblock %}", """
-        <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
-            <div class="md:col-span-2 bg-white p-6 rounded shadow">
-                <div class="flex flex-col md:flex-row justify-between items-start md:items-center mb-4 gap-3">
-                    <h2 class="text-xl font-bold">会员列表与消费档案</h2>
-                    <form action="/admin/customers" method="GET" class="flex gap-2 w-full md:w-auto">
-                        <input type="text" name="q" value="{{ search_query }}" placeholder="搜姓名或手机号..." class="border rounded px-3 py-1 text-sm flex-grow">
-                        <button class="bg-indigo-600 text-white px-3 py-1 rounded text-sm font-bold">搜索</button>
-                        {% if search_query %}
-                        <a href="/admin/customers" class="bg-gray-300 text-gray-700 px-3 py-1 rounded text-sm font-bold flex items-center">重置</a>
-                        {% endif %}
+        <div class="flex flex-col md:flex-row gap-4" style="height: calc(100vh - 140px); min-height: 500px;">
+            <!-- 左侧：会员列表 -->
+            <div class="w-full md:w-80 flex-shrink-0 bg-white rounded-2xl shadow-sm border border-gray-100 flex flex-col overflow-hidden">
+                <div class="p-4 border-b border-gray-100 space-y-2">
+                    <div class="flex items-center justify-between">
+                        <h2 class="font-bold text-gray-900">会员列表</h2>
+                        <button onclick="document.getElementById('addMemberModal').classList.remove('hidden')" class="bg-indigo-600 text-white text-xs font-bold px-3 py-1.5 rounded-lg hover:bg-indigo-700">+ 添加</button>
+                    </div>
+                    <form action="/admin/customers" method="GET" class="flex gap-1">
+                        <input type="text" name="q" value="{{ search_query }}" placeholder="搜姓名或手机号..." class="border border-gray-200 rounded-lg px-2.5 py-1.5 text-sm flex-grow">
+                        {% if search_query %}<a href="/admin/customers" class="text-xs text-gray-400 font-bold px-2 flex items-center">×</a>{% endif %}
                     </form>
                 </div>
-                <table class="w-full text-left border-collapse">
-                    <thead>
-                        <tr class="border-b bg-gray-50 text-sm">
-                            <th class="p-2">姓名</th>
-                            <th class="p-2">电话</th>
-                            <th class="p-2">Credit 余额</th>
-                            <th class="p-2">专属链接</th>
-                            <th class="p-2">操作</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {% for c in customers %}
-                        <tr class="border-b hover:bg-gray-50">
-                            <td class="p-2 font-bold">{{ c.name }}</td>
-                            <td class="p-2">{{ c.phone }}</td>
-                            <td class="p-2 text-green-600 font-bold">RM {{ "%.2f"|format(c.credits) }}</td>
-                            <td class="p-2">
-                                <a href="/customer/{{ c.token }}" target="_blank" class="text-indigo-600 underline text-sm font-bold">查看页面</a>
-                            </td>
-                            <td class="p-2">
-                                <a href="/admin/customer/detail/{{ c.id }}" class="bg-indigo-600 text-white px-3 py-1 rounded text-xs font-bold hover:bg-indigo-700">查看详情</a>
-                            </td>
-                        </tr>
-                        {% else %}
-                        <tr><td colspan="5" class="p-6 text-center text-gray-400">没有找到相关会员</td></tr>
-                        {% endfor %}
-                    </tbody>
-                </table>
+                <div class="overflow-y-auto flex-grow">
+                    {% for c in customers %}
+                    <a href="/admin/customers?id={{ c.id }}{% if search_query %}&q={{ search_query }}{% endif %}" class="block px-4 py-3 border-b border-gray-50 hover:bg-gray-50 {% if selected_customer and c.id == selected_customer.id %}bg-indigo-50 border-l-4 border-l-indigo-600{% endif %}">
+                        <div class="flex justify-between items-start">
+                            <div class="min-w-0">
+                                <div class="font-semibold text-gray-900 text-sm truncate">{{ c.name }}</div>
+                                <div class="text-xs text-gray-400">{{ c.phone }}</div>
+                            </div>
+                            <div class="text-right flex-shrink-0 ml-2">
+                                <div class="text-xs font-bold text-green-600">RM {{ "%.0f"|format(c.credits) }}</div>
+                                <div class="text-[10px] text-gray-400">{{ c.last_order_at.split(' ')[0] if c.last_order_at else '-' }}</div>
+                            </div>
+                        </div>
+                    </a>
+                    {% else %}
+                    <div class="p-6 text-center text-gray-400 text-sm">没有找到相关会员</div>
+                    {% endfor %}
+                </div>
             </div>
-            
-            <div class="bg-white p-6 rounded shadow h-fit">
-                <h2 class="text-xl font-bold mb-4">手动添加会员档案</h2>
+
+            <!-- 右侧：会员详情 -->
+            <div class="flex-grow bg-white rounded-2xl shadow-sm border border-gray-100 overflow-y-auto">
+                {% if selected_customer %}
+                <div class="p-6 space-y-6">
+                    <div class="flex flex-col sm:flex-row justify-between sm:items-center gap-3 border-b border-gray-100 pb-4">
+                        <div>
+                            <h2 class="text-xl font-extrabold text-gray-900">{{ selected_customer.name }}</h2>
+                            <p class="text-sm text-gray-400">{{ selected_customer.phone }} · 专属链接码: {{ selected_customer.token }}</p>
+                            <a href="/customer/{{ selected_customer.token }}" target="_blank" class="text-indigo-600 text-xs font-bold hover:underline">查看顾客专属页面 →</a>
+                        </div>
+                        <div class="text-right">
+                            <div class="text-xs text-gray-400">Credit 余额</div>
+                            <div class="text-2xl font-extrabold text-green-600">RM {{ "%.2f"|format(selected_customer.credits) }}</div>
+                        </div>
+                    </div>
+
+                    <div class="grid grid-cols-2 gap-3">
+                        <div class="bg-gray-50 rounded-xl p-3 text-center">
+                            <div class="text-lg font-extrabold text-gray-900">{{ appointments|length }}</div>
+                            <div class="text-xs text-gray-400">近期预约</div>
+                        </div>
+                        <div class="bg-gray-50 rounded-xl p-3 text-center">
+                            <div class="text-lg font-extrabold text-gray-900">{{ orders|selectattr('status', 'equalto', 'NORMAL')|list|length }}</div>
+                            <div class="text-xs text-gray-400">近期销售笔数</div>
+                        </div>
+                    </div>
+
+                    <div>
+                        <h3 class="font-bold text-gray-800 text-sm mb-2">📅 近期预约</h3>
+                        <div class="space-y-2">
+                            {% for a in appointments %}
+                            <div class="flex justify-between items-center bg-gray-50 rounded-lg p-3 text-sm">
+                                <div>
+                                    <div class="font-semibold text-indigo-600">{{ a.service_name }}</div>
+                                    <div class="text-xs text-gray-500">{{ a.start_time }} ~ {{ a.end_time.split()[1] }} · {{ a.stylist }}</div>
+                                </div>
+                                <span class="text-[11px] font-bold px-2 py-1 rounded-full {% if a.status == 'CONFIRMED' %}bg-green-100 text-green-700{% elif a.status == 'CANCELLED' %}bg-red-100 text-red-600{% else %}bg-gray-100 text-gray-500{% endif %}">{{ a.status }}</span>
+                            </div>
+                            {% else %}
+                            <p class="text-gray-400 text-sm">暂无预约记录</p>
+                            {% endfor %}
+                        </div>
+                    </div>
+
+                    <div>
+                        <h3 class="font-bold text-gray-800 text-sm mb-2">🧾 近期销售 / 消费记录</h3>
+                        <table class="w-full text-left border-collapse text-sm">
+                            <thead><tr class="border-b border-gray-100 text-gray-400 text-xs"><th class="p-2">单号</th><th class="p-2">时间</th><th class="p-2">项目</th><th class="p-2">金额</th><th class="p-2">支付方式</th></tr></thead>
+                            <tbody>
+                                {% for o in orders %}
+                                <tr class="border-b border-gray-50 {% if o.status == 'VOID' %}bg-red-50 text-gray-400 line-through{% endif %}">
+                                    <td class="p-2 font-semibold">{{ o.order_no }}</td>
+                                    <td class="p-2">{{ o.created_at }}</td>
+                                    <td class="p-2">{{ o.item_name }}</td>
+                                    <td class="p-2 font-semibold">RM {{ "%.2f"|format(o.price) }}</td>
+                                    <td class="p-2">{{ '已作废' if o.status == 'VOID' else o.payment_details }}</td>
+                                </tr>
+                                {% else %}
+                                <tr><td colspan="5" class="p-3 text-gray-400">暂无消费订单</td></tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+                {% else %}
+                <div class="h-full flex items-center justify-center text-gray-400 text-sm">从左侧选择一位会员查看详情，或先添加一位新会员</div>
+                {% endif %}
+            </div>
+        </div>
+
+        <!-- 添加会员弹窗 -->
+        <div id="addMemberModal" class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 hidden">
+            <div class="bg-white p-6 rounded-2xl shadow-xl max-w-sm w-full">
+                <div class="flex justify-between items-center mb-4">
+                    <h3 class="text-lg font-bold text-gray-900">手动添加会员档案</h3>
+                    <button onclick="document.getElementById('addMemberModal').classList.add('hidden')" class="text-gray-400 font-bold text-xl">&times;</button>
+                </div>
                 <form action="/admin/customer/add" method="POST">
                     <div class="mb-3">
-                        <label class="block text-sm font-medium">会员姓名</label>
-                        <input type="text" name="name" class="w-full border rounded p-2" required>
+                        <label class="block text-xs font-semibold text-gray-500 mb-1">会员姓名</label>
+                        <input type="text" name="name" class="w-full border border-gray-200 rounded-lg p-2 text-sm" required>
                     </div>
                     <div class="mb-3">
-                        <label class="block text-sm font-medium">电话号码 (唯一凭证)</label>
-                        <input type="text" name="phone" class="w-full border rounded p-2" required>
+                        <label class="block text-xs font-semibold text-gray-500 mb-1">电话号码 (唯一凭证)</label>
+                        <input type="text" name="phone" class="w-full border border-gray-200 rounded-lg p-2 text-sm" required>
                     </div>
                     <div class="mb-4">
-                        <label class="block text-sm font-medium">初始赠送 Credit (RM)</label>
-                        <input type="number" step="0.01" name="credits" class="w-full border rounded p-2" value="0.00">
+                        <label class="block text-xs font-semibold text-gray-500 mb-1">初始赠送 Credit (RM)</label>
+                        <input type="number" step="0.01" name="credits" class="w-full border border-gray-200 rounded-lg p-2 text-sm" value="0.00">
                     </div>
-                    <button class="w-full bg-indigo-600 text-white font-bold py-2 rounded hover:bg-indigo-700">保存会员</button>
+                    <button class="w-full bg-indigo-600 text-white font-bold py-2.5 rounded-lg hover:bg-indigo-700 text-sm">保存会员</button>
                 </form>
             </div>
         </div>
-    """), customers=customers, search_query=search_query)
+    """), customers=customers, search_query=search_query, selected_customer=selected_customer, appointments=appointments, orders=orders)
 
 @app.route("/admin/customer/add", methods=["POST"])
 @admin_required
@@ -1258,78 +1419,8 @@ def admin_add_customer():
 @app.route("/admin/customer/detail/<int:id>")
 @admin_required
 def admin_customer_detail(id):
-    with get_db() as conn:
-        with conn.cursor() as cursor:
-            cursor.execute("SELECT * FROM customers WHERE id = %s", (id,))
-            cust = cursor.fetchone()
-            if not cust:
-                return "找不到该会员", 404
-            cursor.execute("""
-                SELECT o.*, i.item_name, i.price FROM orders o 
-                LEFT JOIN order_items i ON o.id = i.order_id 
-                WHERE o.customer_id = %s 
-                ORDER BY o.created_at DESC
-            """, (id,))
-            orders = cursor.fetchall()
-            cursor.execute("""
-                SELECT a.*, s.name as service_name FROM appointments a
-                JOIN services s ON a.service_id = s.id
-                WHERE a.customer_id = %s
-                ORDER BY a.start_time DESC
-            """, (id,))
-            appointments = cursor.fetchall()
-            
-    return render_template_string(LAYOUT_TEMPLATE.replace("{% block content %}{% endblock %}", """
-        <div class="bg-white p-6 rounded shadow space-y-6">
-            <div class="flex justify-between items-center border-b pb-4">
-                <div>
-                    <h2 class="text-2xl font-bold text-indigo-600">{{ cust.name }} 的会员档案与消费记录</h2>
-                    <p class="text-gray-600">电话: {{ cust.phone }} | 专属链接码: {{ cust.token }}</p>
-                </div>
-                <div class="text-right">
-                    <div class="text-sm text-gray-500">账户 Credit 余额</div>
-                    <div class="text-2xl font-bold text-green-600">RM {{ "%.2f"|format(cust.credits) }}</div>
-                </div>
-            </div>
-
-            <div>
-                <h3 class="text-lg font-bold mb-2">历史预约记录</h3>
-                <table class="w-full text-left border-collapse">
-                    <thead><tr class="border-b bg-gray-50"><th class="p-2">时间段</th><th class="p-2">服务项目</th><th class="p-2">发型师</th><th class="p-2">状态</th></tr></thead>
-                    <tbody>
-                        {% for a in appointments %}
-                        <tr class="border-b"><td class="p-2 font-medium">{{ a.start_time }} ~ {{ a.end_time.split()[1] }}</td><td class="p-2">{{ a.service_name }}</td><td class="p-2">{{ a.stylist }}</td><td class="p-2 text-green-600 font-bold">{{ a.status }}</td></tr>
-                        {% else %}
-                        <tr><td colspan="4" class="p-2 text-gray-400">暂无预约记录</td></tr>
-                        {% endfor %}
-                    </tbody>
-                </table>
-            </div>
-
-            <div>
-                <h3 class="text-lg font-bold mb-2">历史消费与订单明细</h3>
-                <table class="w-full text-left border-collapse">
-                    <thead><tr class="border-b bg-gray-50"><th class="p-2">单号</th><th class="p-2">时间</th><th class="p-2">项目</th><th class="p-2">金额</th><th class="p-2">支付方式</th></tr></thead>
-                    <tbody>
-                        {% for o in orders %}
-                        <tr class="border-b {% if o.status == 'VOID' %}bg-red-50 text-gray-400 line-through{% endif %}">
-                            <td class="p-2 font-bold">{{ o.order_no }}</td>
-                            <td class="p-2">{{ o.created_at }}</td>
-                            <td class="p-2">{{ o.item_name }}</td>
-                            <td class="p-2 font-bold">RM {{ "%.2f"|format(o.price) }}</td>
-                            <td class="p-2 font-bold">{{ '已作废' if o.status == 'VOID' else o.payment_details }}</td>
-                        </tr>
-                        {% else %}
-                        <tr><td colspan="5" class="p-2 text-gray-400">暂无消费订单</td></tr>
-                        {% endfor %}
-                    </tbody>
-                </table>
-            </div>
-            <div>
-                <a href="/admin/customers" class="bg-gray-500 text-white px-4 py-2 rounded font-bold hover:bg-gray-600">返回会员列表</a>
-            </div>
-        </div>
-    """), cust=cust, orders=orders, appointments=appointments)
+    # 旧的会员详情单独页面已经合并进 /admin/customers 的左右分栏视图，这里做个跳转保持旧链接可用
+    return redirect(url_for("admin_customers", id=id))
 
 ADMIN_APPOINTMENTS_TEMPLATE = """
 <!DOCTYPE html>
@@ -1429,7 +1520,10 @@ ADMIN_APPOINTMENTS_TEMPLATE = """
                                             <div class="text-[10px] text-gray-600 truncate">{{ block.service_name }}</div>
                                             <div class="text-[9px] text-gray-400">{{ block.time_range }}</div>
                                         </div>
-                                        <a href="/admin/appointment/delete/{{ block.id }}" onclick="event.stopPropagation(); return confirm('确定取消此预约吗？')" class="text-[11px] font-bold text-red-400 hover:text-red-600 flex-shrink-0">×</a>
+                                        <div class="flex flex-col items-end gap-0.5 flex-shrink-0">
+                                            <a href="/admin/appointment/whatsapp/{{ block.id }}" onclick="event.stopPropagation();" target="_blank" class="text-[11px] font-bold text-green-500 hover:text-green-700">💬</a>
+                                            <a href="/admin/appointment/delete/{{ block.id }}" onclick="event.stopPropagation(); return confirm('确定取消此预约吗？')" class="text-[11px] font-bold text-red-400 hover:text-red-600">×</a>
+                                        </div>
                                     </div>
                                 </div>
                                 {% endfor %}
@@ -1466,7 +1560,8 @@ ADMIN_APPOINTMENTS_TEMPLATE = """
                             <td class="p-3">{{ app.service_name }}</td>
                             <td class="p-3 font-medium text-gray-800">{{ app.stylist }}</td>
                             <td class="p-3"><span class="bg-green-100 text-green-800 px-2 py-1 rounded text-xs font-bold">{{ app.status }}</span></td>
-                            <td class="p-3">
+                            <td class="p-3 flex gap-2 items-center">
+                                <a href="/admin/appointment/whatsapp/{{ app.id }}" target="_blank" class="bg-green-600 text-white px-2.5 py-1 rounded text-xs font-bold hover:bg-green-700">💬 WhatsApp</a>
                                 <a href="/admin/appointment/delete/{{ app.id }}" onclick="return confirm('确定取消此预约吗？')" class="text-red-500 hover:text-red-700 text-sm font-bold">删除</a>
                             </td>
                         </tr>
@@ -1733,6 +1828,39 @@ def delete_appointment(id):
             cursor.execute("DELETE FROM appointments WHERE id = %s", (id,))
             conn.commit()
     return redirect(url_for("admin_appointments"))
+
+@app.route("/admin/appointment/whatsapp/<int:id>")
+@admin_required
+def admin_appointment_whatsapp(id):
+    with get_db() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute("""
+                SELECT a.*, c.name as customer_name, c.phone as customer_phone, c.token as customer_token, s.name as service_name
+                FROM appointments a
+                JOIN customers c ON a.customer_id = c.id
+                JOIN services s ON a.service_id = s.id
+                WHERE a.id = %s
+            """, (id,))
+            appt = cursor.fetchone()
+            if not appt:
+                return "Appointment not found", 404
+
+    portal_link = request.host_url.rstrip('/') + f"/customer/{appt['customer_token']}"
+    msg = (
+        f"🌟 *Dew Hair Salon - Booking Confirmation* 🌟\n\n"
+        f"Hello *{appt['customer_name']}*,\n"
+        f"Your appointment has been confirmed:\n\n"
+        f"💇 *Service:* {appt['service_name']}\n"
+        f"💈 *Stylist:* {appt['stylist']}\n"
+        f"🕐 *Time:* {appt['start_time']} - {appt['end_time'].split(' ')[1]}\n\n"
+        f"🔗 *Manage your booking here:*\n{portal_link}\n\n"
+        f"See you soon!"
+    )
+    phone = "".join(filter(str.isdigit, appt['customer_phone']))
+    if phone.startswith('0'):
+        phone = '6' + phone
+    wa_url = f"https://api.whatsapp.com/send?phone={phone}&text={urllib.parse.quote(msg)}"
+    return redirect(wa_url)
 
 @app.route("/admin/orders")
 @admin_required
@@ -2288,13 +2416,8 @@ def admin_pos():
             stylists = cursor.fetchall()
             cursor.execute("SELECT * FROM customers")
             customers = cursor.fetchall()
-    pos_categories = []
-    seen = set()
-    for s in services:
-        c = s["sub_category"] or s["category_type"]
-        if c not in seen:
-            seen.add(c)
-            pos_categories.append(c)
+            cursor.execute("SELECT name FROM service_categories ORDER BY name")
+            pos_categories = [r["name"] for r in cursor.fetchall()]
     stylists_json = json.dumps([
         {"name": st["name"], "title": st["title"], "commission_type": st["commission_type"], "commission_value": st["commission_value"]}
         for st in stylists
@@ -2907,7 +3030,7 @@ def book_appointment():
             app_id = cursor.fetchone()["id"]
             conn.commit()
 
-    send_telegram_notification(
+    notify_new_booking(
         f"🔔 New Booking!\n👤 {c_name} ({c_phone})\n💇 {service_name}\n💈 {stylist}\n🕐 {start_str} - {end_str.split(' ')[1]}"
     )
     return redirect(url_for("customer_portal", token=cust_token))
