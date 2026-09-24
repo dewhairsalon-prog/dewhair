@@ -78,6 +78,7 @@ def init_db():
             cursor.execute("ALTER TABLE stylists ADD COLUMN IF NOT EXISTS rank_name TEXT DEFAULT ''")
             cursor.execute("ALTER TABLE services ADD COLUMN IF NOT EXISTS stock_qty INTEGER")
             cursor.execute("ALTER TABLE services ADD COLUMN IF NOT EXISTS bookable_online BOOLEAN DEFAULT TRUE")
+            cursor.execute("ALTER TABLE services ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE")
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS service_categories (
                     id SERIAL PRIMARY KEY,
@@ -442,36 +443,50 @@ def admin_dashboard():
 
                 <!-- 项目与套餐列表 -->
                 <div class="bg-white p-6 rounded shadow">
-                    <h2 class="text-xl font-bold mb-4">项目与充值套餐管理</h2>
+                    <h2 class="text-xl font-bold mb-1">项目与充值套餐管理</h2>
+                    <p class="text-xs text-gray-500 mb-4">直接在下面表格里改名字、价格、分类、时长，改完点"保存"就行，不需要删除重加。</p>
                     <table class="w-full text-left">
-                        <thead><tr class="border-b"><th class="p-2">类型</th><th class="p-2">分类标签</th><th class="p-2">名称</th><th class="p-2">售价 (RM)</th><th class="p-2">获得 Credit (RM)</th><th class="p-2">库存</th><th class="p-2">线上预约</th><th class="p-2">操作</th></tr></thead>
+                        <thead><tr class="border-b text-xs text-gray-500"><th class="p-2">类型</th><th class="p-2">分类标签</th><th class="p-2">名称</th><th class="p-2">售价 (RM)</th><th class="p-2">时长(分)</th><th class="p-2">Credit</th><th class="p-2">库存</th><th class="p-2">线上预约</th><th class="p-2">操作</th></tr></thead>
                         <tbody>
                             {% for item in services %}
-                            <tr class="border-b {% if item.category_type == 'Products' and item.stock_qty is not none and item.stock_qty <= 5 %}bg-orange-50{% endif %}">
-                                <td class="p-2 font-bold text-indigo-600">{{ item.category_type }}</td>
-                                <td class="p-2 text-gray-600">{{ item.sub_category }}</td>
-                                <td class="p-2">{{ item.name }}</td>
-                                <td class="p-2 font-bold text-red-600">RM {{ "%.2f"|format(item.price) }}</td>
-                                <td class="p-2 font-bold text-green-600">{% if item.category_type == 'Packages' %}RM {{ "%.2f"|format(item.credit_value) }}{% else %}-{% endif %}</td>
+                            <tr class="border-b {% if item.is_active == false %}bg-gray-100 opacity-60{% elif item.category_type == 'Products' and item.stock_qty is not none and item.stock_qty <= 5 %}bg-orange-50{% endif %}">
+                                <form action="/admin/service/update/{{ item.id }}" method="POST" class="contents">
+                                <td class="p-2">
+                                    <select name="category_type" class="border rounded p-1 text-xs">
+                                        <option value="Services" {% if item.category_type == 'Services' %}selected{% endif %}>Services</option>
+                                        <option value="Packages" {% if item.category_type == 'Packages' %}selected{% endif %}>Packages</option>
+                                        <option value="Products" {% if item.category_type == 'Products' %}selected{% endif %}>Products</option>
+                                    </select>
+                                </td>
+                                <td class="p-2">
+                                    <input type="text" name="sub_category" value="{{ item.sub_category }}" list="existing_categories" class="border rounded p-1 text-xs w-20">
+                                </td>
+                                <td class="p-2"><input type="text" name="name" value="{{ item.name }}" class="border rounded p-1 text-sm w-28" required></td>
+                                <td class="p-2"><input type="number" step="0.01" name="price" value="{{ item.price }}" class="border rounded p-1 text-sm w-20 font-bold text-red-600" required></td>
+                                <td class="p-2"><input type="number" name="duration" value="{{ item.duration }}" class="border rounded p-1 text-sm w-16"></td>
+                                <td class="p-2"><input type="number" step="0.01" name="credit_value" value="{{ item.credit_value }}" class="border rounded p-1 text-sm w-20" placeholder="仅Packages"></td>
                                 <td class="p-2">
                                     {% if item.category_type == 'Products' %}
                                         <span class="font-bold {% if item.stock_qty is none or item.stock_qty <= 5 %}text-orange-600{% else %}text-gray-700{% endif %}">{{ item.stock_qty if item.stock_qty is not none else 0 }}</span>
-                                        {% if item.stock_qty is not none and item.stock_qty <= 5 %}<span class="text-[10px] text-orange-600 font-bold">库存紧张</span>{% endif %}
-                                        <form action="/admin/service/restock/{{ item.id }}" method="POST" class="inline-flex gap-1 mt-1">
-                                            <input type="number" name="delta" placeholder="+数量" class="border rounded p-1 w-16 text-xs" required>
-                                            <button class="bg-green-600 text-white px-2 py-1 rounded text-[10px] font-bold hover:bg-green-700">补货</button>
-                                        </form>
                                     {% else %}-{% endif %}
                                 </td>
-                                <td class="p-2">
-                                    {% if item.category_type == 'Services' %}
-                                        <a href="/admin/service/toggle_online/{{ item.id }}" class="text-xs font-bold px-2 py-1 rounded {% if item.bookable_online %}bg-green-100 text-green-700{% else %}bg-gray-100 text-gray-500{% endif %}">
-                                            {% if item.bookable_online %}✅ 已开放{% else %}🚫 仅限POS{% endif %}
-                                        </a>
-                                    {% else %}-{% endif %}
+                                <td class="p-2 text-center">
+                                    <input type="checkbox" name="bookable_online" {% if item.bookable_online %}checked{% endif %} class="w-4 h-4">
                                 </td>
-                                <td class="p-2">
-                                    <a href="/admin/service/delete/{{ item.id }}" onclick="return confirm('确定要删除吗？')" class="text-red-500 text-sm font-bold">删除</a>
+                                <td class="p-2 flex gap-2 items-center flex-wrap">
+                                    <button class="bg-indigo-600 text-white px-2.5 py-1 rounded text-xs font-bold hover:bg-indigo-700">保存</button>
+                                </form>
+                                    {% if item.category_type == 'Products' %}
+                                    <form action="/admin/service/restock/{{ item.id }}" method="POST" class="inline-flex gap-1">
+                                        <input type="number" name="delta" placeholder="+数量" class="border rounded p-1 w-14 text-xs" required>
+                                        <button class="bg-green-600 text-white px-2 py-1 rounded text-[10px] font-bold hover:bg-green-700">补货</button>
+                                    </form>
+                                    {% endif %}
+                                    {% if item.is_active == false %}
+                                        <a href="/admin/service/reactivate/{{ item.id }}" class="text-green-600 text-xs font-bold">重新上架</a>
+                                    {% else %}
+                                        <a href="/admin/service/delete/{{ item.id }}" onclick="return confirm('确定要删除吗？如果已有历史订单/预约用过这个项目，会自动改成下架而不是真删。')" class="text-red-500 text-xs font-bold">删除/下架</a>
+                                    {% endif %}
                                 </td>
                             </tr>
                             {% endfor %}
@@ -1213,7 +1228,44 @@ def admin_service_restock(id):
 def delete_service(id):
     with get_db() as conn:
         with conn.cursor() as cursor:
-            cursor.execute("DELETE FROM services WHERE id = %s", (id,))
+            try:
+                cursor.execute("DELETE FROM services WHERE id = %s", (id,))
+                conn.commit()
+            except Exception:
+                # 这个服务已经有历史订单或预约引用了，真删会破坏历史记录，改成下架（不再显示/不能再选）而不是硬删
+                conn.rollback()
+                cursor.execute("UPDATE services SET is_active = FALSE, bookable_online = FALSE WHERE id = %s", (id,))
+                conn.commit()
+    return redirect(url_for("admin_dashboard"))
+
+@app.route("/admin/service/update/<int:id>", methods=["POST"])
+@admin_required
+def admin_service_update(id):
+    name = request.form.get("name")
+    cat = request.form.get("category_type")
+    sub_category = (request.form.get("sub_category") or "").strip() or cat
+    price = float(request.form.get("price", 0) or 0)
+    duration = int(request.form.get("duration", 30) or 30)
+    credit_value = float(request.form.get("credit_value", 0) or 0) if cat == 'Packages' else 0.0
+    bookable_online = request.form.get("bookable_online") == "on"
+    with get_db() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute("""
+                UPDATE services SET name = %s, category_type = %s, sub_category = %s, price = %s,
+                       duration = %s, credit_value = %s, bookable_online = %s
+                WHERE id = %s
+            """, (name, cat, sub_category, price, duration, credit_value, bookable_online, id))
+            if sub_category and sub_category not in ("Services", "Packages", "Products"):
+                cursor.execute("INSERT INTO service_categories (name) VALUES (%s) ON CONFLICT (name) DO NOTHING", (sub_category,))
+            conn.commit()
+    return redirect(url_for("admin_dashboard"))
+
+@app.route("/admin/service/reactivate/<int:id>")
+@admin_required
+def admin_service_reactivate(id):
+    with get_db() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute("UPDATE services SET is_active = TRUE WHERE id = %s", (id,))
             conn.commit()
     return redirect(url_for("admin_dashboard"))
 
@@ -1704,7 +1756,7 @@ def admin_appointments():
             """, (f"{selected_date}%",))
             appointments = cursor.fetchall()
             
-            cursor.execute("SELECT * FROM services WHERE category_type != 'Packages'")
+            cursor.execute("SELECT * FROM services WHERE category_type != 'Packages' AND COALESCE(is_active, TRUE) = TRUE")
             services = cursor.fetchall()
             cursor.execute("SELECT * FROM stylists")
             stylists = cursor.fetchall()
@@ -1792,6 +1844,7 @@ def admin_add_appointment():
     b_time = request.form.get("booking_time")
     c_name = request.form.get("customer_name")
     c_phone = request.form.get("customer_phone")
+    buffer_minutes = get_int_setting("buffer_minutes", 0, minimum=0)
     
     with get_db() as conn:
         with conn.cursor() as cursor:
@@ -1803,7 +1856,7 @@ def admin_add_appointment():
             start_str = start_dt.strftime("%Y-%m-%d %H:%M")
             end_str = end_dt.strftime("%Y-%m-%d %H:%M")
 
-            if find_conflicting_appointment(cursor, stylist, start_str, end_str, buffer_minutes=get_int_setting("buffer_minutes", 0, minimum=0)):
+            if find_conflicting_appointment(cursor, stylist, start_str, end_str, buffer_minutes=buffer_minutes):
                 return redirect(url_for("admin_appointments", date=b_date, error="该发型师这个时间段已经有预约了，请换个时间或发型师！"))
             
             cursor.execute("SELECT id FROM customers WHERE phone = %s", (c_phone,))
@@ -2410,7 +2463,7 @@ def admin_payroll_print():
 def admin_pos():
     with get_db() as conn:
         with conn.cursor() as cursor:
-            cursor.execute("SELECT * FROM services ORDER BY sub_category, name")
+            cursor.execute("SELECT * FROM services WHERE COALESCE(is_active, TRUE) = TRUE ORDER BY sub_category, name")
             services = cursor.fetchall()
             cursor.execute("SELECT * FROM stylists")
             stylists = cursor.fetchall()
@@ -2954,7 +3007,7 @@ def index():
                 if d_str == today_str: wd_str = "Today"
                 date_strip.append({"date_str": d_str, "display_date": d.strftime("%m-%d"), "year": d.strftime("%Y"), "weekday": wd_str})
                 
-            cursor.execute("SELECT * FROM services WHERE category_type != 'Packages' AND COALESCE(bookable_online, TRUE) = TRUE")
+            cursor.execute("SELECT * FROM services WHERE category_type != 'Packages' AND COALESCE(bookable_online, TRUE) = TRUE AND COALESCE(is_active, TRUE) = TRUE")
             services = cursor.fetchall()
             cursor.execute("SELECT * FROM stylists")
             stylists = cursor.fetchall()
@@ -2982,6 +3035,11 @@ def book_appointment():
     b_time = request.form.get("booking_time")
     c_name = request.form.get("customer_name")
     c_phone = request.form.get("customer_phone")
+
+    # 先把要用到的设置都读出来，避免在下面的数据库事务进行到一半时再嵌套开连接
+    closed_wd = get_setting("closed_weekdays", "1")
+    max_advance_days = get_int_setting("max_advance_days", 30, minimum=1)
+    buffer_minutes = get_int_setting("buffer_minutes", 0, minimum=0)
     
     with get_db() as conn:
         with conn.cursor() as cursor:
@@ -2991,11 +3049,9 @@ def book_appointment():
                 return redirect(url_for("index", date=b_date, error="We're closed on this date. Please pick another day."))
             
             dt_obj = datetime.strptime(b_date, "%Y-%m-%d")
-            closed_wd = get_setting("closed_weekdays", "1")
             if closed_wd != '-1' and dt_obj.weekday() == int(closed_wd):
                 return redirect(url_for("index", date=b_date, error="We're closed on this day of the week. Please pick another day."))
 
-            max_advance_days = get_int_setting("max_advance_days", 30, minimum=1)
             if dt_obj.date() > (datetime.now(MY_TZ).date() + timedelta(days=max_advance_days)):
                 return redirect(url_for("index", date=b_date, error=f"Bookings can only be made up to {max_advance_days} days in advance."))
                 
@@ -3010,7 +3066,6 @@ def book_appointment():
             end_str = end_dt.strftime("%Y-%m-%d %H:%M")
 
             # 检查该发型师这个时间段是否已被预约（含缓冲时间）
-            buffer_minutes = get_int_setting("buffer_minutes", 0, minimum=0)
             if find_conflicting_appointment(cursor, stylist, start_str, end_str, buffer_minutes=buffer_minutes):
                 return redirect(url_for("index", date=b_date, error="This stylist already has a booking at that time. Please choose another time or stylist."))
             
