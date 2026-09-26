@@ -1598,8 +1598,8 @@ ADMIN_APPOINTMENTS_TEMPLATE = """
                                 {% for block in timeline_blocks.get(col.key, []) %}
                                 <div class="absolute left-1 right-1 rounded-lg border-l-4 px-2 py-1 overflow-hidden shadow-sm hover:shadow-md transition cursor-default" style="top: {{ "%.0f"|format(block.top) }}px; height: {{ "%.0f"|format(block.height) }}px; background:{{ block.color.bg }}; border-color:{{ block.color.border }};">
                                     <div class="flex justify-between items-start gap-1">
-                                        <div class="min-w-0">
-                                            <div class="text-[11px] font-bold truncate" style="color:{{ block.color.text }};">{{ block.customer_name }}</div>
+                                        <div class="min-w-0 cursor-pointer" onclick="openCustQuickModal('{{ block.customer_id }}', '{{ block.customer_name|e }}', '{{ block.customer_phone }}', '{{ block.id }}')">
+                                            <div class="text-[11px] font-bold truncate underline decoration-dotted" style="color:{{ block.color.text }};">{{ block.customer_name }}</div>
                                             <div class="text-[10px] text-gray-600 truncate">{{ block.service_name }}</div>
                                             <div class="text-[9px] text-gray-400">{{ block.time_range }}</div>
                                         </div>
@@ -1638,7 +1638,7 @@ ADMIN_APPOINTMENTS_TEMPLATE = """
                         {% for app in appointments %}
                         <tr class="border-b hover:bg-gray-50">
                             <td class="p-3 font-bold text-indigo-600">{{ app.start_time.split()[1] }} ~ {{ app.end_time.split()[1] }}</td>
-                            <td class="p-3 font-bold">{{ app.customer_name }}</td>
+                            <td class="p-3 font-bold text-indigo-600 cursor-pointer underline decoration-dotted" onclick="openCustQuickModal('{{ app.customer_id }}', '{{ app.customer_name|e }}', '{{ app.customer_phone }}', '{{ app.id }}')">{{ app.customer_name }}</td>
                             <td class="p-3 text-gray-600">{{ app.customer_phone }}</td>
                             <td class="p-3">{{ app.service_name }}</td>
                             <td class="p-3 font-medium text-gray-800">{{ app.stylist }}</td>
@@ -1665,14 +1665,10 @@ ADMIN_APPOINTMENTS_TEMPLATE = """
                 <button onclick="closeAdminBookModal()" class="text-gray-500 font-bold text-xl">&times;</button>
             </div>
             <form action="/admin/appointment/add" method="POST">
-                <div class="mb-3">
-                    <label class="block text-sm font-bold mb-1">选择已有会员 (可选)</label>
-                    <select name="customer_id" onchange="fillAdminCustomer(this)" class="w-full border rounded p-2 text-sm">
-                        <option value="">-- 手动输入新客信息 --</option>
-                        {% for c in customers %}
-                        <option value="{{ c.id }}" data-name="{{ c.name }}" data-phone="{{ c.phone }}">{{ c.name }} ({{ c.phone }})</option>
-                        {% endfor %}
-                    </select>
+                <div class="mb-3 relative">
+                    <label class="block text-sm font-bold mb-1">搜索已有会员 (输入姓名或电话，留空则下方手动填新客资料)</label>
+                    <input type="text" id="admin_cust_search" oninput="filterAdminCustomerList(this)" onfocus="filterAdminCustomerList(this)" placeholder="输入姓名或电话搜索..." autocomplete="off" class="w-full border rounded p-2 text-sm">
+                    <div id="admin_cust_dropdown" class="hidden absolute z-20 bg-white border rounded-lg shadow-lg max-h-48 overflow-y-auto w-full mt-1"></div>
                 </div>
                 <div class="grid grid-cols-2 gap-3 mb-3">
                     <div>
@@ -1722,6 +1718,40 @@ ADMIN_APPOINTMENTS_TEMPLATE = """
         </div>
     </div>
 
+    <!-- 顾客快捷操作弹窗 -->
+    <div id="custQuickModal" class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 hidden">
+        <div class="bg-white p-6 rounded-2xl shadow-xl max-w-xs w-full">
+            <div class="flex justify-between items-start mb-4">
+                <div>
+                    <div id="cq_name" class="font-bold text-gray-900 text-lg"></div>
+                    <div id="cq_phone" class="text-sm text-gray-400"></div>
+                </div>
+                <button onclick="closeCustQuickModal()" class="text-gray-400 font-bold text-xl">&times;</button>
+            </div>
+            <div class="space-y-2">
+                <a id="cq_pos_link" href="#" class="block bg-green-600 text-white text-center font-bold py-2.5 rounded-lg hover:bg-green-700 text-sm">💳 收银开单</a>
+                <a id="cq_profile_link" href="#" class="block bg-indigo-600 text-white text-center font-bold py-2.5 rounded-lg hover:bg-indigo-700 text-sm">👤 查看会员资料</a>
+                <a id="cq_whatsapp_link" href="#" target="_blank" class="block bg-gray-100 text-gray-700 text-center font-bold py-2.5 rounded-lg hover:bg-gray-200 text-sm">💬 发送预约详情 (WhatsApp)</a>
+                <a id="cq_cancel_link" href="#" onclick="return confirm('确定取消此预约吗？')" class="block bg-red-50 text-red-600 text-center font-bold py-2.5 rounded-lg hover:bg-red-100 text-sm">取消预约</a>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        function openCustQuickModal(customerId, name, phone, appointmentId) {
+            document.getElementById('cq_name').innerText = name;
+            document.getElementById('cq_phone').innerText = phone;
+            document.getElementById('cq_pos_link').href = '/admin/pos?customer_id=' + customerId;
+            document.getElementById('cq_profile_link').href = '/admin/customers?id=' + customerId;
+            document.getElementById('cq_whatsapp_link').href = '/admin/appointment/whatsapp/' + appointmentId;
+            document.getElementById('cq_cancel_link').href = '/admin/appointment/delete/' + appointmentId;
+            document.getElementById('custQuickModal').classList.remove('hidden');
+        }
+        function closeCustQuickModal() {
+            document.getElementById('custQuickModal').classList.add('hidden');
+        }
+    </script>
+
     <script>
         function changeAdminDate(dateStr) { window.location.href = "/admin/appointments?date=" + dateStr; }
         function openAdminBookModal() { document.getElementById('adminBookModal').classList.remove('hidden'); }
@@ -1732,16 +1762,39 @@ ADMIN_APPOINTMENTS_TEMPLATE = """
             document.getElementById('btn-view-timeline').className = 'text-xs font-bold px-3 py-1.5 rounded-lg ' + (view === 'timeline' ? 'bg-indigo-600 text-white' : 'bg-gray-100 text-gray-600');
             document.getElementById('btn-view-list').className = 'text-xs font-bold px-3 py-1.5 rounded-lg ' + (view === 'list' ? 'bg-indigo-600 text-white' : 'bg-gray-100 text-gray-600');
         }
-        function fillAdminCustomer(sel) {
-            const opt = sel.options[sel.selectedIndex];
-            if(opt.value) {
-                document.getElementById('admin_cust_name').value = opt.getAttribute('data-name');
-                document.getElementById('admin_cust_phone').value = opt.getAttribute('data-phone');
-            } else {
-                document.getElementById('admin_cust_name').value = '';
-                document.getElementById('admin_cust_phone').value = '';
+        const ADMIN_CUSTOMERS = {{ customers_json|safe }};
+        function filterAdminCustomerList(input) {
+            const query = input.value.trim().toLowerCase();
+            const dropdown = document.getElementById('admin_cust_dropdown');
+            if (!query) { dropdown.classList.add('hidden'); dropdown.innerHTML = ''; return; }
+            const matches = ADMIN_CUSTOMERS.filter(c =>
+                c.name.toLowerCase().includes(query) || c.phone.includes(query)
+            ).slice(0, 8);
+            if (matches.length === 0) {
+                dropdown.innerHTML = '<div class="px-3 py-2 text-sm text-gray-400">没有找到匹配的会员</div>';
+                dropdown.classList.remove('hidden');
+                return;
             }
+            dropdown.innerHTML = matches.map(c =>
+                `<div onclick="selectAdminCustomer(${c.id})" class="px-3 py-2 hover:bg-indigo-50 cursor-pointer text-sm border-b last:border-b-0">
+                    <span class="font-semibold">${c.name}</span> <span class="text-gray-400">(${c.phone})</span>
+                 </div>`
+            ).join('');
+            dropdown.classList.remove('hidden');
         }
+        function selectAdminCustomer(id) {
+            const c = ADMIN_CUSTOMERS.find(x => x.id === id);
+            if (!c) return;
+            document.getElementById('admin_cust_search').value = c.name + ' (' + c.phone + ')';
+            document.getElementById('admin_cust_name').value = c.name;
+            document.getElementById('admin_cust_phone').value = c.phone;
+            document.getElementById('admin_cust_dropdown').classList.add('hidden');
+        }
+        document.addEventListener('click', function(e) {
+            if (!e.target.closest('#admin_cust_search') && !e.target.closest('#admin_cust_dropdown')) {
+                document.getElementById('admin_cust_dropdown').classList.add('hidden');
+            }
+        });
     </script>
 </body>
 </html>
@@ -1849,7 +1902,7 @@ def admin_appointments():
         top_px = max(0, (start_min - day_start_min) * PX_PER_MIN)
         height_px = max(22, (end_min - start_min) * PX_PER_MIN)
         block = {
-            "id": a["id"], "customer_name": a["customer_name"], "customer_phone": a["customer_phone"],
+            "id": a["id"], "customer_id": a["customer_id"], "customer_name": a["customer_name"], "customer_phone": a["customer_phone"],
             "service_name": a["service_name"], "status": a["status"], "stylist": a["stylist"],
             "time_range": f"{start_hm} - {end_hm}", "top": top_px, "height": height_px,
         }
@@ -1864,7 +1917,8 @@ def admin_appointments():
     if other_col_needed:
         timeline_columns.append({"key": "__other__", "name": "Other", "title": "已删除/未匹配员工", "color": {"bg": "#f3f4f6", "border": "#9ca3af", "text": "#4b5563"}})
 
-    return render_template_string(ADMIN_APPOINTMENTS_TEMPLATE, appointments=appointments, date_strip=date_strip, selected_date=selected_date, today_str=today_str, services=services, stylists=stylists, customers=customers, timeslots=timeslots, error=request.args.get("error"), timeline_columns=timeline_columns, timeline_blocks=timeline_blocks, timeline_height=timeline_height, hour_marks=hour_marks)
+    customers_json = json.dumps([{"id": c["id"], "name": c["name"], "phone": c["phone"]} for c in customers])
+    return render_template_string(ADMIN_APPOINTMENTS_TEMPLATE, appointments=appointments, date_strip=date_strip, selected_date=selected_date, today_str=today_str, services=services, stylists=stylists, customers=customers, timeslots=timeslots, error=request.args.get("error"), timeline_columns=timeline_columns, timeline_blocks=timeline_blocks, timeline_height=timeline_height, hour_marks=hour_marks, customers_json=customers_json)
 
 @app.route("/admin/appointment/add", methods=["POST"])
 @admin_required
@@ -2492,6 +2546,7 @@ def admin_payroll_print():
 @app.route("/admin/pos")
 @admin_required
 def admin_pos():
+    prefill_customer_id = request.args.get("customer_id", type=int)
     with get_db() as conn:
         with conn.cursor() as cursor:
             cursor.execute("SELECT * FROM services WHERE COALESCE(is_active, TRUE) = TRUE ORDER BY sub_category, name")
@@ -2508,6 +2563,7 @@ def admin_pos():
         {"name": st["name"], "title": st["title"], "commission_type": st["commission_type"], "commission_value": st["commission_value"]}
         for st in stylists
     ])
+    prefill_customer = next((c for c in customers if c["id"] == prefill_customer_id), None) if prefill_customer_id else None
     return render_template_string(LAYOUT_TEMPLATE.replace("{% block content %}{% endblock %}", """
         <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
             <div class="md:col-span-2 bg-white p-5 rounded-2xl shadow-sm border border-gray-100">
@@ -2557,22 +2613,27 @@ def admin_pos():
                 <form action="/admin/checkout" method="POST">
                     <input type="hidden" name="cart_data" id="cart_data_input">
                     <input type="hidden" name="discount_percent" id="discount_percent_input" value="0">
+                    {% if prefill_customer %}
+                    <div class="mb-3 p-2.5 bg-indigo-50 border border-indigo-100 rounded-lg text-xs text-indigo-700 font-semibold">
+                        👤 已带入顾客: {{ prefill_customer.name }} ({{ prefill_customer.phone }})
+                    </div>
+                    {% endif %}
                     <div class="mb-3">
                         <label class="block text-xs font-semibold text-gray-500 mb-1">选择已有会员</label>
                         <select name="customer_phone" id="cust_select" onchange="fillCustomer(this)" class="w-full border border-gray-200 rounded-lg p-2 text-sm">
                             <option value="">-- 新客或手动输入 --</option>
                             {% for c in customers %}
-                            <option value="{{ c.phone }}" data-name="{{ c.name }}">{{ c.name }} ({{ c.phone }}) - 余额: RM {{ c.credits }}</option>
+                            <option value="{{ c.phone }}" data-name="{{ c.name }}" {% if prefill_customer and c.id == prefill_customer.id %}selected{% endif %}>{{ c.name }} ({{ c.phone }}) - 余额: RM {{ c.credits }}</option>
                             {% endfor %}
                         </select>
                     </div>
                     <div class="mb-3">
                         <label class="block text-xs font-semibold text-gray-500 mb-1">顾客姓名</label>
-                        <input type="text" name="customer_name" id="cust_name" class="w-full border border-gray-200 rounded-lg p-2 text-sm" required>
+                        <input type="text" name="customer_name" id="cust_name" value="{{ prefill_customer.name if prefill_customer else '' }}" class="w-full border border-gray-200 rounded-lg p-2 text-sm" required>
                     </div>
                     <div class="mb-3">
                         <label class="block text-xs font-semibold text-gray-500 mb-1">顾客电话</label>
-                        <input type="text" name="customer_phone_input" id="cust_phone" class="w-full border border-gray-200 rounded-lg p-2 text-sm" required>
+                        <input type="text" name="customer_phone_input" id="cust_phone" value="{{ prefill_customer.phone if prefill_customer else '' }}" class="w-full border border-gray-200 rounded-lg p-2 text-sm" required>
                     </div>
                     <div class="mb-4">
                         <label class="block text-xs font-semibold text-gray-500 mb-1">支付方式</label>
@@ -2781,7 +2842,7 @@ def admin_pos():
                 }
             }
         </script>
-    """), services=services, stylists=stylists, customers=customers, stylists_json=stylists_json, pos_categories=pos_categories)
+    """), services=services, stylists=stylists, customers=customers, stylists_json=stylists_json, pos_categories=pos_categories, prefill_customer=prefill_customer)
 
 @app.route("/admin/checkout", methods=["POST"])
 @admin_required
