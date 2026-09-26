@@ -241,6 +241,17 @@ def get_int_setting(key, default, minimum=None):
         value = max(minimum, value)
     return value
 
+def sync_service_categories(cursor):
+    """把散落在各个服务 sub_category 字段里、但还没登记进分类管理表的分类名，自动补登记进去。
+    保证「分类管理」里看到的清单，永远等于系统里实际在用的所有分类，不会有遗漏或不一致。"""
+    cursor.execute("""
+        INSERT INTO service_categories (name)
+        SELECT DISTINCT sub_category FROM services
+        WHERE sub_category IS NOT NULL AND TRIM(sub_category) != ''
+          AND sub_category NOT IN ('Services', 'Packages', 'Products')
+        ON CONFLICT (name) DO NOTHING
+    """)
+
 def find_conflicting_appointment(cursor, stylist, start_str, end_str, exclude_id=None, buffer_minutes=0):
     """检查某发型师在这个时间段是否已经有其他预约（含缓冲时间，缓冲时间内也视为冲突）"""
     if buffer_minutes:
@@ -338,6 +349,8 @@ def admin_dashboard():
         with conn.cursor() as cursor:
             cursor.execute("SELECT * FROM services ORDER BY category_type, sub_category")
             services = cursor.fetchall()
+            sync_service_categories(cursor)
+            conn.commit()
             cursor.execute("SELECT name FROM service_categories ORDER BY name")
             existing_categories = [r["name"] for r in cursor.fetchall()]
             cursor.execute("SELECT * FROM stylists ORDER BY id DESC")
@@ -459,7 +472,14 @@ def admin_dashboard():
                                     </select>
                                 </td>
                                 <td class="p-2">
-                                    <input type="text" name="sub_category" value="{{ item.sub_category }}" list="existing_categories" class="border rounded p-1 text-xs w-20">
+                                    <select name="sub_category" class="border rounded p-1 text-xs w-24">
+                                        {% for c in existing_categories %}
+                                        <option value="{{ c }}" {% if item.sub_category == c %}selected{% endif %}>{{ c }}</option>
+                                        {% endfor %}
+                                        {% if item.sub_category and item.sub_category not in existing_categories %}
+                                        <option value="{{ item.sub_category }}" selected>{{ item.sub_category }} (未登记)</option>
+                                        {% endif %}
+                                    </select>
                                 </td>
                                 <td class="p-2"><input type="text" name="name" value="{{ item.name }}" class="border rounded p-1 text-sm w-28" required></td>
                                 <td class="p-2"><input type="number" step="0.01" name="price" value="{{ item.price }}" class="border rounded p-1 text-sm w-20 font-bold text-red-600" required></td>
@@ -528,13 +548,17 @@ def admin_dashboard():
                             </select>
                         </div>
                         <div class="mb-3">
-                            <label class="block text-sm font-medium">服务分类标签 (用于 POS 分类，如: 剪发/染发/美甲)</label>
-                            <input type="text" name="sub_category" list="existing_categories" class="w-full border rounded p-2" placeholder="例如: 剪发">
-                            <datalist id="existing_categories">
+                            <label class="block text-sm font-medium">服务分类标签 (用于 POS 分类)</label>
+                            <select name="sub_category" id="sub_category_select" onchange="toggleNewCategoryInput(this)" class="w-full border rounded p-2">
+                                {% if not existing_categories %}
+                                <option value="">-- 还没有分类，先在下面新增一个 --</option>
+                                {% endif %}
                                 {% for c in existing_categories %}
-                                <option value="{{ c }}">
+                                <option value="{{ c }}">{{ c }}</option>
                                 {% endfor %}
-                            </datalist>
+                                <option value="__new__">+ 新增分类...</option>
+                            </select>
+                            <input type="text" name="new_category_name" id="new_category_name" class="w-full border rounded p-2 mt-2" placeholder="输入新分类名称，如: Ala Carte" style="display:{% if not existing_categories %}block{% else %}none{% endif %};">
                         </div>
                         <div class="mb-3">
                             <label class="block text-sm font-medium">售价 / 金额 (RM)</label>
@@ -565,6 +589,9 @@ def admin_dashboard():
             function toggleCreditInput(sel) {
                 document.getElementById('credit_value_div').style.display = (sel.value === 'Packages') ? 'block' : 'none';
                 document.getElementById('stock_qty_div').style.display = (sel.value === 'Products') ? 'block' : 'none';
+            }
+            function toggleNewCategoryInput(sel) {
+                document.getElementById('new_category_name').style.display = (sel.value === '__new__' || sel.value === '') ? 'block' : 'none';
             }
         </script>
     """), services=services, stylists=stylists, holidays=holidays, open_time=open_time, close_time=close_time, closed_wd=closed_wd, current_month=current_month_prefix, staff_performance=staff_performance, existing_categories=existing_categories, slot_interval=slot_interval, max_advance_days=max_advance_days, buffer_minutes=buffer_minutes)
@@ -1165,8 +1192,10 @@ def admin_settings():
         with conn.cursor() as cursor:
             cursor.execute("SELECT * FROM holidays ORDER BY date_str DESC")
             holidays = cursor.fetchall()
+            sync_service_categories(cursor)
             cursor.execute("SELECT * FROM service_categories ORDER BY name")
             categories = cursor.fetchall()
+            conn.commit()
     return render_template_string(
         LAYOUT_TEMPLATE.replace("{% block content %}{% endblock %}", SETTINGS_TEMPLATE),
         open_time=open_time, close_time=close_time, closed_wd=closed_wd,
@@ -1184,6 +1213,8 @@ def add_service():
     name = request.form.get("name")
     cat = request.form.get("category_type")
     sub_category = (request.form.get("sub_category") or "").strip() or cat
+    if sub_category == "__new__" or not sub_category:
+        sub_category = (request.form.get("new_category_name") or "").strip() or cat
     price = float(request.form.get("price", 0))
     duration = int(request.form.get("duration", 30))
     credit_value = float(request.form.get("credit_value", 0)) if cat == 'Packages' else 0.0
@@ -2469,6 +2500,8 @@ def admin_pos():
             stylists = cursor.fetchall()
             cursor.execute("SELECT * FROM customers")
             customers = cursor.fetchall()
+            sync_service_categories(cursor)
+            conn.commit()
             cursor.execute("SELECT name FROM service_categories ORDER BY name")
             pos_categories = [r["name"] for r in cursor.fetchall()]
     stylists_json = json.dumps([
