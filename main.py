@@ -116,6 +116,8 @@ def init_db():
                 );
             """)
             cursor.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS discount_percent DOUBLE PRECISION DEFAULT 0.0")
+            cursor.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS discount_type TEXT DEFAULT 'percent'")
+            cursor.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS discount_amount DOUBLE PRECISION DEFAULT 0.0")
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS order_items (
                     id SERIAL PRIMARY KEY,
@@ -240,6 +242,18 @@ def get_int_setting(key, default, minimum=None):
     if minimum is not None:
         value = max(minimum, value)
     return value
+
+def format_duration(minutes):
+    """把分钟数转成更友好的显示，如 45min / 1h / 1h 30m，参考 Tunai Pro 的展示方式"""
+    if not minutes:
+        return ""
+    minutes = int(minutes)
+    h, m = divmod(minutes, 60)
+    if h and m:
+        return f"{h}h {m}m"
+    if h:
+        return f"{h}h"
+    return f"{m}min"
 
 def sync_service_categories(cursor):
     """把散落在各个服务 sub_category 字段里、但还没登记进分类管理表的分类名，自动补登记进去。
@@ -2132,10 +2146,15 @@ def build_receipt_pdf(order, items):
         staff_names = ", ".join(c["staff_name"] for c in item.get("collaborators", [])) or (item.get("staff_name") or "-")
         table_data.append([item["item_name"], staff_names, f"{item['price']:.2f}"])
         subtotal += item["price"]
-    discount_pct = order.get("discount_percent") or 0
-    if discount_pct > 0:
+    discount_amt = order.get("discount_amount") or 0
+    if discount_amt > 0:
+        discount_type = order.get("discount_type") or "percent"
+        if discount_type == "fixed":
+            label = "Discount (fixed)"
+        else:
+            label = f"Discount ({(order.get('discount_percent') or 0):.1f}%)"
         table_data.append(["", "Subtotal", f"RM {subtotal:.2f}"])
-        table_data.append(["", f"Discount ({discount_pct:.1f}%)", f"- RM {(subtotal - order['total_amount']):.2f}"])
+        table_data.append(["", label, f"- RM {discount_amt:.2f}"])
     table_data.append(["", "Total", f"RM {order['total_amount']:.2f}"])
 
     tbl = Table(table_data, colWidths=[70*mm, 60*mm, 30*mm])
@@ -2284,8 +2303,12 @@ def admin_order_invoice(id):
                 </tbody>
             </table>
             <div style="text-align:right;margin-bottom:20px;">
-                {% if order.discount_percent and order.discount_percent > 0 %}
-                <div style="font-size:13px;color:#dc2626;margin-bottom:4px;">Discount applied: {{ "%.1f"|format(order.discount_percent) }}%</div>
+                {% if order.discount_amount and order.discount_amount > 0 %}
+                <div style="font-size:13px;color:#dc2626;margin-bottom:4px;">
+                    {% if order.discount_type == 'fixed' %}Discount applied: RM {{ "%.2f"|format(order.discount_amount) }} off
+                    {% else %}Discount applied: {{ "%.1f"|format(order.discount_percent) }}% (- RM {{ "%.2f"|format(order.discount_amount) }})
+                    {% endif %}
+                </div>
                 {% endif %}
                 <div style="font-size:18px;font-weight:bold;">Total Amount: <span style="color:#dc2626;">RM {{ "%.2f"|format(order.total_amount) }}</span></div>
             </div>
@@ -2603,8 +2626,14 @@ def admin_pos():
                 <div id="order-items" class="min-h-[150px] border-b border-gray-100 mb-4 pb-2"><p class="text-gray-400 text-sm">点击左侧项目加入订单</p></div>
 
                 <div class="mb-3 flex items-center justify-between gap-2">
-                    <label class="text-xs font-semibold text-gray-500">整单折扣 %</label>
-                    <input type="number" id="discount_percent" min="0" max="100" step="0.1" value="0" oninput="renderCart()" class="w-20 border border-gray-200 rounded-lg p-1.5 text-sm text-right">
+                    <label class="text-xs font-semibold text-gray-500">整单折扣</label>
+                    <div class="flex gap-1">
+                        <select id="discount_type" onchange="renderCart()" class="border border-gray-200 rounded-lg p-1.5 text-xs">
+                            <option value="percent">%</option>
+                            <option value="fixed">RM</option>
+                        </select>
+                        <input type="number" id="discount_value" min="0" step="0.1" value="0" oninput="renderCart()" class="w-20 border border-gray-200 rounded-lg p-1.5 text-sm text-right">
+                    </div>
                 </div>
                 <div class="text-sm text-gray-500 flex justify-between mb-1"><span>小计</span><span>RM <span id="subtotal-amount">0.00</span></span></div>
                 <div class="text-sm text-red-500 flex justify-between mb-1" id="discount-row" style="display:none;"><span>折扣</span><span>- RM <span id="discount-amount">0.00</span></span></div>
@@ -2612,7 +2641,8 @@ def admin_pos():
                 
                 <form action="/admin/checkout" method="POST">
                     <input type="hidden" name="cart_data" id="cart_data_input">
-                    <input type="hidden" name="discount_percent" id="discount_percent_input" value="0">
+                    <input type="hidden" name="discount_type" id="discount_type_input" value="percent">
+                    <input type="hidden" name="discount_value" id="discount_value_input" value="0">
                     {% if prefill_customer %}
                     <div class="mb-3 p-2.5 bg-indigo-50 border border-indigo-100 rounded-lg text-xs text-indigo-700 font-semibold">
                         👤 已带入顾客: {{ prefill_customer.name }} ({{ prefill_customer.phone }})
@@ -2820,17 +2850,25 @@ def admin_pos():
                             </div>
                         </div>`;
                 });
-                let discountPct = parseFloat(document.getElementById('discount_percent').value) || 0;
-                if (discountPct < 0) discountPct = 0;
-                if (discountPct > 100) discountPct = 100;
-                const discountAmt = subtotal * (discountPct / 100);
-                const finalTotal = subtotal - discountAmt;
+                const discountType = document.getElementById('discount_type').value;
+                let discountValue = parseFloat(document.getElementById('discount_value').value) || 0;
+                if (discountValue < 0) discountValue = 0;
+                let discountAmt;
+                if (discountType === 'percent') {
+                    if (discountValue > 100) discountValue = 100;
+                    discountAmt = subtotal * (discountValue / 100);
+                } else {
+                    if (discountValue > subtotal) discountValue = subtotal;
+                    discountAmt = discountValue;
+                }
+                const finalTotal = Math.max(0, subtotal - discountAmt);
 
                 document.getElementById('subtotal-amount').innerText = subtotal.toFixed(2);
-                document.getElementById('discount-row').style.display = discountPct > 0 ? 'flex' : 'none';
+                document.getElementById('discount-row').style.display = discountAmt > 0 ? 'flex' : 'none';
                 document.getElementById('discount-amount').innerText = discountAmt.toFixed(2);
                 document.getElementById('total-amount').innerText = finalTotal.toFixed(2);
-                document.getElementById('discount_percent_input').value = discountPct;
+                document.getElementById('discount_type_input').value = discountType;
+                document.getElementById('discount_value_input').value = discountValue;
                 document.getElementById('cart_data_input').value = JSON.stringify(cart);
             }
 
@@ -2856,9 +2894,17 @@ def checkout():
         pay_method = request.form.get("payment_method")
         remark = (request.form.get("remark") or "").strip()
         subtotal = sum(item["price"] for item in cart_data)
-        discount_percent = float(request.form.get("discount_percent", 0) or 0)
-        discount_percent = max(0.0, min(100.0, discount_percent))
-        total = round(subtotal * (1 - discount_percent / 100), 2)
+        discount_type = request.form.get("discount_type", "percent")
+        discount_value = float(request.form.get("discount_value", 0) or 0)
+        discount_value = max(0.0, discount_value)
+        if discount_type == "fixed":
+            discount_amount = min(discount_value, subtotal)
+            discount_percent_stored = round((discount_amount / subtotal * 100), 2) if subtotal > 0 else 0.0
+        else:
+            discount_value = min(discount_value, 100.0)
+            discount_amount = round(subtotal * (discount_value / 100), 2)
+            discount_percent_stored = discount_value
+        total = round(subtotal - discount_amount, 2)
         
         current_time_str = get_current_time()
         order_no = "INV" + datetime.now(MY_TZ).strftime("%Y%m%d%H%M%S")
@@ -2893,7 +2939,7 @@ def checkout():
                     current_credits -= total
                     cursor.execute("UPDATE customers SET credits = %s WHERE id = %s", (current_credits, cust_id))
                     
-                cursor.execute("INSERT INTO orders (order_no, customer_id, total_amount, payment_details, status, created_at, discount_percent, remark) VALUES (%s, %s, %s, %s, 'NORMAL', %s, %s, %s) RETURNING id", (order_no, cust_id, total, pay_method, current_time_str, discount_percent, remark))
+                cursor.execute("INSERT INTO orders (order_no, customer_id, total_amount, payment_details, status, created_at, discount_percent, discount_type, discount_amount, remark) VALUES (%s, %s, %s, %s, 'NORMAL', %s, %s, %s, %s, %s) RETURNING id", (order_no, cust_id, total, pay_method, current_time_str, discount_percent_stored, discount_type, discount_amount, remark))
                 order_id = cursor.fetchone()["id"]
                 
                 for item in cart_data:
@@ -2974,20 +3020,31 @@ BOOKING_CALENDAR_TEMPLATE = """
                     <span class="step-badge">1</span>
                     <h2 class="font-bold text-gray-900">Choose a service</h2>
                 </div>
-                <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+
+                <input type="text" id="svc_search" oninput="filterServices()" placeholder="🔍 Search services..." class="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm mb-3 focus:border-indigo-500 focus:outline-none">
+
+                <div class="flex gap-2 overflow-x-auto pb-3 mb-1 border-b border-gray-100">
+                    <button type="button" onclick="filterServices('__all__')" data-svc-cat-btn="__all__" class="svc-tab flex-shrink-0 px-3.5 py-1.5 rounded-full text-xs font-bold bg-indigo-600 text-white">All</button>
+                    {% for c in booking_categories %}
+                    <button type="button" onclick="filterServices('{{ c }}')" data-svc-cat-btn="{{ c }}" class="svc-tab flex-shrink-0 px-3.5 py-1.5 rounded-full text-xs font-bold bg-gray-100 text-gray-600 hover:bg-gray-200">{{ c }}</button>
+                    {% endfor %}
+                </div>
+
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-3" id="svc_grid">
                     {% for item in services %}
-                    <label class="group border-2 border-gray-100 rounded-xl p-3 cursor-pointer hover:border-indigo-400 has-[:checked]:border-indigo-600 has-[:checked]:bg-indigo-50 flex items-center justify-between transition">
-                        <div>
-                            <div class="font-semibold text-gray-900">{{ item.name }}</div>
-                            <div class="text-xs text-gray-400">{{ item.duration }} min</div>
+                    <label class="svc-item group border-2 border-gray-100 rounded-xl p-3 cursor-pointer hover:border-indigo-400 has-[:checked]:border-indigo-600 has-[:checked]:bg-indigo-50 flex items-center justify-between transition" data-cat="{{ item.sub_category or item.category_type }}" data-name="{{ item.name|lower }}">
+                        <div class="min-w-0">
+                            <div class="font-semibold text-gray-900 truncate">{{ item.name }}</div>
+                            <div class="text-xs text-gray-400">{{ item.sub_category or item.category_type }}{% if item.duration_display %} · {{ item.duration_display }}{% endif %}</div>
                         </div>
-                        <div class="text-right flex items-center gap-2">
+                        <div class="text-right flex items-center gap-2 flex-shrink-0">
                             <span class="text-indigo-600 font-bold text-sm">RM {{ "%.2f"|format(item.price) }}</span>
                             <input type="radio" name="service_id" value="{{ item.id }}" class="accent-indigo-600 w-4 h-4" required {% if loop.first %}checked{% endif %}>
                         </div>
                     </label>
                     {% endfor %}
                 </div>
+                <p id="svc_empty_hint" class="hidden text-center text-gray-400 text-sm py-6">No services match your search</p>
             </div>
 
             <!-- Step 2: Stylist -->
@@ -3066,6 +3123,34 @@ BOOKING_CALENDAR_TEMPLATE = """
         </form>
     </div>
     <script>
+        let currentSvcCat = '__all__';
+        function filterServices(cat) {
+            if (cat !== undefined) currentSvcCat = cat;
+            document.querySelectorAll('.svc-tab').forEach(btn => {
+                const active = btn.getAttribute('data-svc-cat-btn') === currentSvcCat;
+                btn.className = 'svc-tab flex-shrink-0 px-3.5 py-1.5 rounded-full text-xs font-bold ' + (active ? 'bg-indigo-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200');
+            });
+            const query = document.getElementById('svc_search').value.trim().toLowerCase();
+            let visibleCount = 0;
+            let firstVisibleRadio = null;
+            document.querySelectorAll('.svc-item').forEach(el => {
+                const matchesCat = currentSvcCat === '__all__' || el.getAttribute('data-cat') === currentSvcCat;
+                const matchesSearch = !query || el.getAttribute('data-name').includes(query);
+                const show = matchesCat && matchesSearch;
+                el.style.display = show ? '' : 'none';
+                if (show) {
+                    visibleCount++;
+                    const radio = el.querySelector('input[type="radio"]');
+                    if (!firstVisibleRadio) firstVisibleRadio = radio;
+                }
+            });
+            document.getElementById('svc_empty_hint').classList.toggle('hidden', visibleCount > 0);
+            // 如果当前选中的服务被筛选掉了，自动帮顾客选第一个可见的，避免提交时选到隐藏项
+            const checkedRadio = document.querySelector('input[name="service_id"]:checked');
+            if (checkedRadio && checkedRadio.closest('.svc-item').style.display === 'none' && firstVisibleRadio) {
+                firstVisibleRadio.checked = true;
+            }
+        }
         function selectDateCard(dateStr) {
             document.getElementById('booking_date').value = dateStr;
             document.querySelectorAll('.date-card').forEach(card => {
@@ -3101,8 +3186,17 @@ def index():
                 if d_str == today_str: wd_str = "Today"
                 date_strip.append({"date_str": d_str, "display_date": d.strftime("%m-%d"), "year": d.strftime("%Y"), "weekday": wd_str})
                 
-            cursor.execute("SELECT * FROM services WHERE category_type != 'Packages' AND COALESCE(bookable_online, TRUE) = TRUE AND COALESCE(is_active, TRUE) = TRUE")
+            cursor.execute("SELECT * FROM services WHERE category_type != 'Packages' AND COALESCE(bookable_online, TRUE) = TRUE AND COALESCE(is_active, TRUE) = TRUE ORDER BY sub_category, name")
             services = cursor.fetchall()
+            for s in services:
+                s["duration_display"] = format_duration(s["duration"])
+            booking_categories = []
+            seen_cat = set()
+            for s in services:
+                c = s["sub_category"] or s["category_type"]
+                if c not in seen_cat:
+                    seen_cat.add(c)
+                    booking_categories.append(c)
             cursor.execute("SELECT * FROM stylists")
             stylists = cursor.fetchall()
             
@@ -3119,7 +3213,7 @@ def index():
         st += timedelta(minutes=slot_interval_min)
         
     error = request.args.get("error")
-    return render_template_string(BOOKING_CALENDAR_TEMPLATE, services=services, stylists=stylists, date_strip=date_strip, selected_date=selected_date, today_str=today_str, open_time=open_time_str, close_time=close_time_str, timeslots=timeslots, error=error, max_date=max_date_str)
+    return render_template_string(BOOKING_CALENDAR_TEMPLATE, services=services, stylists=stylists, date_strip=date_strip, selected_date=selected_date, today_str=today_str, open_time=open_time_str, close_time=close_time_str, timeslots=timeslots, error=error, max_date=max_date_str, booking_categories=booking_categories)
 
 @app.route("/book", methods=["POST"])
 def book_appointment():
