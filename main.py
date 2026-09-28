@@ -51,7 +51,21 @@ def close_db_connection(exception=None):
         except Exception:
             pass
 
+SCHEMA_VERSION = "1"  # 每次改动数据库结构（新增表/字段）时手动加 1，才会触发下面完整的建表流程重跑一次
+
 def init_db():
+    # 快速检查：如果数据库已经初始化过同一版本的结构，直接跳过下面一大串建表/加字段的 SQL，
+    # 大幅缩短每次从休眠中重启时的冷启动时间（不用每次重启都对着 Supabase 跑 20 多条 DDL）
+    with get_db() as conn:
+        with conn.cursor() as cursor:
+            try:
+                cursor.execute("SELECT value FROM settings WHERE key = 'schema_version'")
+                row = cursor.fetchone()
+                if row and row["value"] == SCHEMA_VERSION:
+                    return
+            except Exception:
+                conn.rollback()  # settings 表可能还不存在（全新数据库），走下面完整初始化流程
+
     with get_db() as conn:
         with conn.cursor() as cursor:
             cursor.execute("""
@@ -212,6 +226,11 @@ def init_db():
                 """)
                 for row in cursor.fetchall():
                     cursor.execute("INSERT INTO service_categories (name) VALUES (%s) ON CONFLICT (name) DO NOTHING", (row["sub_category"],))
+
+            cursor.execute("""
+                INSERT INTO settings (key, value) VALUES ('schema_version', %s)
+                ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+            """, (SCHEMA_VERSION,))
         conn.commit()
 
 with app.app_context():
@@ -3167,6 +3186,11 @@ BOOKING_CALENDAR_TEMPLATE = """
 </body>
 </html>
 """
+
+@app.route("/healthz")
+def healthz():
+    """极速保活入口：不查数据库、不渲染页面，只返回 ok。给 cron-job.org 这类定时访问服务用。"""
+    return "ok", 200
 
 @app.route("/", methods=["GET"])
 def index():
