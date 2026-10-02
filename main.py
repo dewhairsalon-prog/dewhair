@@ -1624,12 +1624,12 @@ ADMIN_APPOINTMENTS_TEMPLATE = """
                                     <div class="text-[10px] text-gray-400 truncate">{{ col.title }}</div>
                                 </div>
                             </div>
-                            <div class="relative" style="height: {{ timeline_height }}px; background-image: repeating-linear-gradient(to bottom, #f3f4f6 0, #f3f4f6 1px, transparent 1px, transparent {{ "%.0f"|format(60 * 1.6) }}px);">
+                            <div class="relative cursor-copy" onclick="openBookingAtTime(event, '{{ col.key }}')" style="height: {{ timeline_height }}px; background-image: repeating-linear-gradient(to bottom, #f3f4f6 0, #f3f4f6 1px, transparent 1px, transparent {{ "%.0f"|format(60 * 1.6) }}px);">
                                 {% for hm in hour_marks %}
                                 <div class="absolute left-0 right-0 border-t border-gray-100" style="top: {{ "%.0f"|format(hm.top) }}px;"></div>
                                 {% endfor %}
                                 {% for block in timeline_blocks.get(col.key, []) %}
-                                <div class="absolute left-1 right-1 rounded-lg border-l-4 px-2 py-1 overflow-hidden shadow-sm hover:shadow-md transition cursor-default" style="top: {{ "%.0f"|format(block.top) }}px; height: {{ "%.0f"|format(block.height) }}px; background:{{ block.color.bg }}; border-color:{{ block.color.border }};">
+                                <div onclick="event.stopPropagation();" class="absolute left-1 right-1 rounded-lg border-l-4 px-2 py-1 overflow-hidden shadow-sm hover:shadow-md transition cursor-default" style="top: {{ "%.0f"|format(block.top) }}px; height: {{ "%.0f"|format(block.height) }}px; background:{{ block.color.bg }}; border-color:{{ block.color.border }};">
                                     <div class="flex justify-between items-start gap-1">
                                         <div class="min-w-0 cursor-pointer" onclick="openCustQuickModal('{{ block.customer_id }}', '{{ block.customer_name|e }}', '{{ block.customer_phone }}', '{{ block.id }}')">
                                             <div class="text-[11px] font-bold truncate underline decoration-dotted" style="color:{{ block.color.text }};">{{ block.customer_name }}</div>
@@ -1723,7 +1723,7 @@ ADMIN_APPOINTMENTS_TEMPLATE = """
                 </div>
                 <div class="mb-3">
                     <label class="block text-sm font-bold mb-1">选择发型师</label>
-                    <select name="stylist" class="w-full border rounded p-2 text-sm" required>
+                    <select name="stylist" id="modal_stylist_select" class="w-full border rounded p-2 text-sm" required>
                         {% for st in stylists %}
                         <option value="{{ st.name }} ({{ st.title }})">{{ st.name }} ({{ st.title }})</option>
                         {% endfor %}
@@ -1732,11 +1732,11 @@ ADMIN_APPOINTMENTS_TEMPLATE = """
                 <div class="grid grid-cols-2 gap-3 mb-4">
                     <div>
                         <label class="block text-sm font-bold mb-1">预约日期</label>
-                        <input type="date" name="booking_date" value="{{ selected_date }}" class="w-full border rounded p-2 text-sm" required>
+                        <input type="date" name="booking_date" id="modal_date_input" value="{{ selected_date }}" class="w-full border rounded p-2 text-sm" required>
                     </div>
                     <div>
                         <label class="block text-sm font-bold mb-1">预约时间段</label>
-                        <select name="booking_time" class="w-full border rounded p-2 text-sm" required>
+                        <select name="booking_time" id="modal_time_select" class="w-full border rounded p-2 text-sm" required>
                             {% for t in timeslots %}
                             <option value="{{ t }}">{{ t }}</option>
                             {% endfor %}
@@ -1786,9 +1786,39 @@ ADMIN_APPOINTMENTS_TEMPLATE = """
     </script>
 
     <script>
+        const TIMELINE_DAY_START_MIN = {{ day_start_min }};
+        const TIMELINE_PX_PER_MIN = {{ px_per_min }};
+        const TIMELINE_SLOT_INTERVAL = {{ slot_interval_min }};
+
         function changeAdminDate(dateStr) { window.location.href = "/admin/appointments?date=" + dateStr; }
         function openAdminBookModal() { document.getElementById('adminBookModal').classList.remove('hidden'); }
         function closeAdminBookModal() { document.getElementById('adminBookModal').classList.add('hidden'); }
+
+        function openBookingAtTime(event, stylistKey) {
+            const rect = event.currentTarget.getBoundingClientRect();
+            const clickY = event.clientY - rect.top;
+            let minutesFromOpen = clickY / TIMELINE_PX_PER_MIN;
+            // 对齐到最近的预约时段间隔，比如每 30 分钟一格
+            minutesFromOpen = Math.round(minutesFromOpen / TIMELINE_SLOT_INTERVAL) * TIMELINE_SLOT_INTERVAL;
+            const totalMin = TIMELINE_DAY_START_MIN + minutesFromOpen;
+            const hh = String(Math.floor(totalMin / 60)).padStart(2, '0');
+            const mm = String(totalMin % 60).padStart(2, '0');
+            const timeStr = hh + ':' + mm;
+
+            const stylistSelect = document.getElementById('modal_stylist_select');
+            for (const opt of stylistSelect.options) {
+                if (opt.value === stylistKey) { stylistSelect.value = stylistKey; break; }
+            }
+            const timeSelect = document.getElementById('modal_time_select');
+            let matched = false;
+            for (const opt of timeSelect.options) {
+                if (opt.value === timeStr) { timeSelect.value = timeStr; matched = true; break; }
+            }
+            if (!matched && timeSelect.options.length > 0) {
+                timeSelect.selectedIndex = 0; // 点到的时间超出范围时，兜底选第一个可选时段
+            }
+            openAdminBookModal();
+        }
         function showView(view) {
             document.getElementById('view-timeline').classList.toggle('hidden', view !== 'timeline');
             document.getElementById('view-list').classList.toggle('hidden', view !== 'list');
@@ -1916,8 +1946,10 @@ def admin_appointments():
         timeline_columns.append(col)
         col_key_lookup[key] = col
 
-    # 小时刻度线（每小时一条，顶部对齐营业时间）
+    # 小时刻度线（每小时一条，顶部对齐营业时间）；如果开门时间不是整点，额外加一条精确的开门时间刻度
     hour_marks = []
+    if day_start_min % 60 != 0:
+        hour_marks.append({"label": open_time_str, "top": 0})
     h_min = (day_start_min // 60) * 60
     if h_min < day_start_min:
         h_min += 60
@@ -1951,7 +1983,7 @@ def admin_appointments():
         timeline_columns.append({"key": "__other__", "name": "Other", "title": "已删除/未匹配员工", "color": {"bg": "#f3f4f6", "border": "#9ca3af", "text": "#4b5563"}})
 
     customers_json = json.dumps([{"id": c["id"], "name": c["name"], "phone": c["phone"]} for c in customers])
-    return render_template_string(ADMIN_APPOINTMENTS_TEMPLATE, appointments=appointments, date_strip=date_strip, selected_date=selected_date, today_str=today_str, services=services, stylists=stylists, customers=customers, timeslots=timeslots, error=request.args.get("error"), timeline_columns=timeline_columns, timeline_blocks=timeline_blocks, timeline_height=timeline_height, hour_marks=hour_marks, customers_json=customers_json)
+    return render_template_string(ADMIN_APPOINTMENTS_TEMPLATE, appointments=appointments, date_strip=date_strip, selected_date=selected_date, today_str=today_str, services=services, stylists=stylists, customers=customers, timeslots=timeslots, error=request.args.get("error"), timeline_columns=timeline_columns, timeline_blocks=timeline_blocks, timeline_height=timeline_height, hour_marks=hour_marks, customers_json=customers_json, day_start_min=day_start_min, px_per_min=PX_PER_MIN, slot_interval_min=slot_interval_min)
 
 @app.route("/admin/appointment/add", methods=["POST"])
 @admin_required
@@ -2606,6 +2638,7 @@ def admin_pos():
         for st in stylists
     ])
     prefill_customer = next((c for c in customers if c["id"] == prefill_customer_id), None) if prefill_customer_id else None
+    customers_json = json.dumps([{"id": c["id"], "name": c["name"], "phone": c["phone"], "credits": c["credits"]} for c in customers])
     return render_template_string(LAYOUT_TEMPLATE.replace("{% block content %}{% endblock %}", """
         <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
             <div class="md:col-span-2 bg-white p-5 rounded-2xl shadow-sm border border-gray-100">
@@ -2658,7 +2691,7 @@ def admin_pos():
                 <div class="text-sm text-red-500 flex justify-between mb-1" id="discount-row" style="display:none;"><span>折扣</span><span>- RM <span id="discount-amount">0.00</span></span></div>
                 <div class="text-lg font-bold mb-4 flex justify-between border-t border-gray-100 pt-2"><span class="text-gray-700 text-sm font-medium">应付总额</span><span class="text-red-600">RM <span id="total-amount">0.00</span></span></div>
                 
-                <form action="/admin/checkout" method="POST">
+                <form action="/admin/checkout" method="POST" onsubmit="clearPosState()">
                     <input type="hidden" name="cart_data" id="cart_data_input">
                     <input type="hidden" name="discount_type" id="discount_type_input" value="percent">
                     <input type="hidden" name="discount_value" id="discount_value_input" value="0">
@@ -2667,22 +2700,18 @@ def admin_pos():
                         👤 已带入顾客: {{ prefill_customer.name }} ({{ prefill_customer.phone }})
                     </div>
                     {% endif %}
-                    <div class="mb-3">
-                        <label class="block text-xs font-semibold text-gray-500 mb-1">选择已有会员</label>
-                        <select name="customer_phone" id="cust_select" onchange="fillCustomer(this)" class="w-full border border-gray-200 rounded-lg p-2 text-sm">
-                            <option value="">-- 新客或手动输入 --</option>
-                            {% for c in customers %}
-                            <option value="{{ c.phone }}" data-name="{{ c.name }}" {% if prefill_customer and c.id == prefill_customer.id %}selected{% endif %}>{{ c.name }} ({{ c.phone }}) - 余额: RM {{ c.credits }}</option>
-                            {% endfor %}
-                        </select>
+                    <div class="mb-3 relative">
+                        <label class="block text-xs font-semibold text-gray-500 mb-1">搜索已有会员 (输入姓名或电话)</label>
+                        <input type="text" id="pos_cust_search" oninput="filterPosCustomerList(this)" onfocus="filterPosCustomerList(this)" placeholder="输入姓名或电话搜索..." autocomplete="off" class="w-full border border-gray-200 rounded-lg p-2 text-sm">
+                        <div id="pos_cust_dropdown" class="hidden absolute z-20 bg-white border border-gray-200 rounded-lg shadow-lg max-h-48 overflow-y-auto w-full mt-1"></div>
                     </div>
                     <div class="mb-3">
                         <label class="block text-xs font-semibold text-gray-500 mb-1">顾客姓名</label>
-                        <input type="text" name="customer_name" id="cust_name" value="{{ prefill_customer.name if prefill_customer else '' }}" class="w-full border border-gray-200 rounded-lg p-2 text-sm" required>
+                        <input type="text" name="customer_name" id="cust_name" value="{{ prefill_customer.name if prefill_customer else '' }}" oninput="savePosState()" class="w-full border border-gray-200 rounded-lg p-2 text-sm" required>
                     </div>
                     <div class="mb-3">
                         <label class="block text-xs font-semibold text-gray-500 mb-1">顾客电话</label>
-                        <input type="text" name="customer_phone_input" id="cust_phone" value="{{ prefill_customer.phone if prefill_customer else '' }}" class="w-full border border-gray-200 rounded-lg p-2 text-sm" required>
+                        <input type="text" name="customer_phone_input" id="cust_phone" value="{{ prefill_customer.phone if prefill_customer else '' }}" oninput="savePosState()" class="w-full border border-gray-200 rounded-lg p-2 text-sm" required>
                     </div>
                     <div class="mb-4">
                         <label class="block text-xs font-semibold text-gray-500 mb-1">支付方式</label>
@@ -2695,7 +2724,7 @@ def admin_pos():
                     </div>
                     <div class="mb-4">
                         <label class="block text-xs font-semibold text-gray-500 mb-1">备注 (会显示在单据上，选填)</label>
-                        <input type="text" name="remark" placeholder="例如: 顾客要求下次换用敏感肌染发剂" class="w-full border border-gray-200 rounded-lg p-2 text-sm">
+                        <input type="text" name="remark" oninput="savePosState()" placeholder="例如: 顾客要求下次换用敏感肌染发剂" class="w-full border border-gray-200 rounded-lg p-2 text-sm">
                     </div>
                     <button class="w-full bg-green-600 text-white font-bold py-3 rounded-xl hover:bg-green-700 shadow-sm">完成收款与记账</button>
                 </form>
@@ -2730,6 +2759,38 @@ def admin_pos():
             let editingIndex = null;
             let currentCat = '__all__';
             const STYLISTS = {{ stylists_json|safe }};
+
+            // 用 localStorage 记住当前这一单，跳去别的页面再回来也不会丢
+            function savePosState() {
+                try {
+                    localStorage.setItem('pos_cart_state', JSON.stringify({
+                        cart: cart,
+                        cust_name: document.getElementById('cust_name').value,
+                        cust_phone: document.getElementById('cust_phone').value,
+                        discount_type: document.getElementById('discount_type').value,
+                        discount_value: document.getElementById('discount_value').value,
+                        remark: document.querySelector('input[name="remark"]').value,
+                    }));
+                } catch (e) {}
+            }
+            function clearPosState() {
+                try { localStorage.removeItem('pos_cart_state'); } catch (e) {}
+            }
+            function restorePosState() {
+                let saved = null;
+                try { saved = JSON.parse(localStorage.getItem('pos_cart_state') || 'null'); } catch (e) {}
+                if (!saved) return;
+                cart = saved.cart || [];
+                {% if not prefill_customer %}
+                if (saved.cust_name) document.getElementById('cust_name').value = saved.cust_name;
+                if (saved.cust_phone) document.getElementById('cust_phone').value = saved.cust_phone;
+                {% endif %}
+                if (saved.discount_type) document.getElementById('discount_type').value = saved.discount_type;
+                if (saved.discount_value) document.getElementById('discount_value').value = saved.discount_value;
+                if (saved.remark) document.querySelector('input[name="remark"]').value = saved.remark;
+                renderCart();
+            }
+            document.addEventListener('DOMContentLoaded', restorePosState);
 
             function filterPOS(cat) {
                 if (cat !== undefined) currentCat = cat;
@@ -2889,17 +2950,45 @@ def admin_pos():
                 document.getElementById('discount_type_input').value = discountType;
                 document.getElementById('discount_value_input').value = discountValue;
                 document.getElementById('cart_data_input').value = JSON.stringify(cart);
+                savePosState();
             }
 
-            function fillCustomer(select) {
-                const opt = select.options[select.selectedIndex];
-                if (opt.value) {
-                    document.getElementById('cust_phone').value = opt.value;
-                    document.getElementById('cust_name').value = opt.getAttribute('data-name');
+            const POS_CUSTOMERS = {{ customers_json|safe }};
+            function filterPosCustomerList(input) {
+                const query = input.value.trim().toLowerCase();
+                const dropdown = document.getElementById('pos_cust_dropdown');
+                if (!query) { dropdown.classList.add('hidden'); dropdown.innerHTML = ''; return; }
+                const matches = POS_CUSTOMERS.filter(c =>
+                    c.name.toLowerCase().includes(query) || c.phone.includes(query)
+                ).slice(0, 8);
+                if (matches.length === 0) {
+                    dropdown.innerHTML = '<div class="px-3 py-2 text-sm text-gray-400">没有找到匹配的会员</div>';
+                    dropdown.classList.remove('hidden');
+                    return;
                 }
+                dropdown.innerHTML = matches.map(c =>
+                    `<div onclick="selectPosCustomer(${c.id})" class="px-3 py-2 hover:bg-indigo-50 cursor-pointer text-sm border-b last:border-b-0">
+                        <span class="font-semibold">${c.name}</span> <span class="text-gray-400">(${c.phone})</span>
+                        <span class="text-green-600 text-xs float-right">RM ${c.credits.toFixed(2)}</span>
+                     </div>`
+                ).join('');
+                dropdown.classList.remove('hidden');
             }
+            function selectPosCustomer(id) {
+                const c = POS_CUSTOMERS.find(x => x.id === id);
+                if (!c) return;
+                document.getElementById('pos_cust_search').value = c.name + ' (' + c.phone + ')';
+                document.getElementById('cust_name').value = c.name;
+                document.getElementById('cust_phone').value = c.phone;
+                document.getElementById('pos_cust_dropdown').classList.add('hidden');
+            }
+            document.addEventListener('click', function(e) {
+                if (!e.target.closest('#pos_cust_search') && !e.target.closest('#pos_cust_dropdown')) {
+                    document.getElementById('pos_cust_dropdown').classList.add('hidden');
+                }
+            });
         </script>
-    """), services=services, stylists=stylists, customers=customers, stylists_json=stylists_json, pos_categories=pos_categories, prefill_customer=prefill_customer)
+    """), services=services, stylists=stylists, customers=customers, stylists_json=stylists_json, pos_categories=pos_categories, prefill_customer=prefill_customer, customers_json=customers_json)
 
 @app.route("/admin/checkout", methods=["POST"])
 @admin_required
@@ -3252,6 +3341,7 @@ def book_appointment():
     closed_wd = get_setting("closed_weekdays", "1")
     max_advance_days = get_int_setting("max_advance_days", 30, minimum=1)
     buffer_minutes = get_int_setting("buffer_minutes", 0, minimum=0)
+    close_time_str = get_setting("close_time", "20:00")
     
     with get_db() as conn:
         with conn.cursor() as cursor:
