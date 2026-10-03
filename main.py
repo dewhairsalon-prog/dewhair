@@ -15,6 +15,7 @@ from flask import (
 )
 
 app = Flask(__name__)
+APP_BUILD_VERSION = "2026-10-02-v6"  # 每次交付新文件都手动改一下这行，方便部署后一眼确认版本对不对
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", secrets.token_hex(32))
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "123456")
 
@@ -3278,8 +3279,9 @@ BOOKING_CALENDAR_TEMPLATE = """
 
 @app.route("/healthz")
 def healthz():
-    """极速保活入口：不查数据库、不渲染页面，只返回 ok。给 cron-job.org 这类定时访问服务用。"""
-    return "ok", 200
+    """极速保活入口：不查数据库、不渲染页面，只返回 ok + 版本号。给 cron-job.org 这类定时访问服务用，
+    也方便部署后直接打开这个网址确认是不是真的换上了最新代码（版本号对不对）。"""
+    return f"ok - {APP_BUILD_VERSION}", 200
 
 @app.route("/", methods=["GET"])
 def index():
