@@ -15,7 +15,7 @@ from flask import (
 )
 
 app = Flask(__name__)
-APP_BUILD_VERSION = "2026-10-02-v6"  # 每次交付新文件都手动改一下这行，方便部署后一眼确认版本对不对
+APP_BUILD_VERSION = "2026-10-02-v7"  # 每次交付新文件都手动改一下这行，方便部署后一眼确认版本对不对
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", secrets.token_hex(32))
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "123456")
 
@@ -2091,8 +2091,36 @@ def admin_orders():
             query += " ORDER BY o.created_at DESC"
             cursor.execute(query, params)
             orders = cursor.fetchall()
+
+            today_str = get_current_date()
+            month_prefix = today_str[:7]
+            cursor.execute("SELECT COALESCE(SUM(total_amount),0) as total, COUNT(*) as cnt FROM orders WHERE status = 'NORMAL' AND created_at LIKE %s", (f"{today_str}%",))
+            today_summary = cursor.fetchone()
+            cursor.execute("SELECT COALESCE(SUM(total_amount),0) as total, COUNT(*) as cnt FROM orders WHERE status = 'NORMAL' AND created_at LIKE %s", (f"{month_prefix}%",))
+            month_summary = cursor.fetchone()
+
+        filtered_total = sum(o["total_amount"] for o in orders if o["status"] == "NORMAL")
+        filtered_count = sum(1 for o in orders if o["status"] == "NORMAL")
         
     return render_template_string(LAYOUT_TEMPLATE.replace("{% block content %}{% endblock %}", """
+        <div class="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-4">
+            <div class="bg-white rounded-2xl shadow-sm border border-gray-100 p-5">
+                <div class="text-xs font-semibold text-gray-400 mb-1">今天营业额</div>
+                <div class="text-2xl font-extrabold text-gray-900">RM {{ "%.2f"|format(today_summary.total) }}</div>
+                <div class="text-xs text-gray-400 mt-1">{{ today_summary.cnt }} 笔订单</div>
+            </div>
+            <div class="bg-white rounded-2xl shadow-sm border border-gray-100 p-5">
+                <div class="text-xs font-semibold text-gray-400 mb-1">本月营业额</div>
+                <div class="text-2xl font-extrabold text-gray-900">RM {{ "%.2f"|format(month_summary.total) }}</div>
+                <div class="text-xs text-gray-400 mt-1">{{ month_summary.cnt }} 笔订单</div>
+            </div>
+            <div class="bg-indigo-50 rounded-2xl border border-indigo-100 p-5">
+                <div class="text-xs font-semibold text-indigo-400 mb-1">当前筛选结果合计</div>
+                <div class="text-2xl font-extrabold text-indigo-700">RM {{ "%.2f"|format(filtered_total) }}</div>
+                <div class="text-xs text-indigo-400 mt-1">{{ filtered_count }} 笔订单（不含已作废）</div>
+            </div>
+        </div>
+
         <div class="bg-white p-6 rounded shadow space-y-4">
             <div class="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
                 <h2 class="text-xl font-bold">历史订单管理与单据查询</h2>
@@ -2150,7 +2178,7 @@ def admin_orders():
                 </tbody>
             </table>
         </div>
-    """), orders=orders, search_q=search_q, date_q=date_q)
+    """), orders=orders, search_q=search_q, date_q=date_q, today_summary=today_summary, month_summary=month_summary, filtered_total=filtered_total, filtered_count=filtered_count)
 
 @app.route("/admin/order/remark/<int:id>", methods=["POST"])
 @admin_required
@@ -2162,8 +2190,6 @@ def update_order_remark(id):
             conn.commit()
     return redirect(url_for("admin_orders"))
 
-@app.route("/admin/order/whatsapp/<int:id>")
-@admin_required
 def build_receipt_pdf(order, items):
     """用 reportlab 生成一份真正的 PDF 收据（不含员工佣金，只显示员工名字）"""
     from reportlab.lib.pagesizes import A4
@@ -2675,7 +2701,16 @@ def admin_pos():
                 <p id="pos_empty_hint" class="hidden text-center text-gray-400 text-sm py-8">没有符合条件的项目</p>
             </div>
             <div class="bg-white p-5 rounded-2xl shadow-sm border border-gray-100 h-fit">
-                <h2 class="text-lg font-bold text-gray-900 mb-4">当前订单结账</h2>
+                <div class="flex items-center justify-between mb-3">
+                    <h2 class="text-lg font-bold text-gray-900">当前订单结账</h2>
+                    <button type="button" onclick="holdCurrentOrder()" class="text-xs font-bold text-indigo-600 bg-indigo-50 px-2.5 py-1.5 rounded-lg hover:bg-indigo-100">⏸ 暂存这单</button>
+                </div>
+
+                <div id="held_orders_panel" class="hidden mb-4 border border-amber-200 bg-amber-50 rounded-xl p-3">
+                    <div class="text-xs font-bold text-amber-700 mb-2">🕒 暂存中的订单（点击可以继续结账）</div>
+                    <div id="held_orders_list" class="space-y-1.5"></div>
+                </div>
+
                 <div id="order-items" class="min-h-[150px] border-b border-gray-100 mb-4 pb-2"><p class="text-gray-400 text-sm">点击左侧项目加入订单</p></div>
 
                 <div class="mb-3 flex items-center justify-between gap-2">
@@ -2791,7 +2826,85 @@ def admin_pos():
                 if (saved.remark) document.querySelector('input[name="remark"]').value = saved.remark;
                 renderCart();
             }
-            document.addEventListener('DOMContentLoaded', restorePosState);
+            document.addEventListener('DOMContentLoaded', function() {
+                restorePosState();
+                renderHeldOrdersList();
+            });
+
+            // 暂存多个顾客的订单：比如正在帮 A 结账时 B 也要买单，先把 A 这单存起来，处理完 B 再回来继续 A
+            function getHeldOrders() {
+                try { return JSON.parse(localStorage.getItem('pos_held_orders') || '[]'); } catch (e) { return []; }
+            }
+            function setHeldOrders(list) {
+                try { localStorage.setItem('pos_held_orders', JSON.stringify(list)); } catch (e) {}
+            }
+            function holdCurrentOrder() {
+                if (cart.length === 0) { alert('当前订单是空的，没有东西可以暂存'); return; }
+                const held = getHeldOrders();
+                held.push({
+                    cart: cart,
+                    cust_name: document.getElementById('cust_name').value,
+                    cust_phone: document.getElementById('cust_phone').value,
+                    discount_type: document.getElementById('discount_type').value,
+                    discount_value: document.getElementById('discount_value').value,
+                    remark: document.querySelector('input[name="remark"]').value,
+                    savedAt: new Date().toLocaleTimeString('en-MY', {hour: '2-digit', minute: '2-digit'}),
+                });
+                setHeldOrders(held);
+                // 清空当前这单，方便马上开始接待下一位顾客
+                cart = [];
+                document.getElementById('cust_name').value = '';
+                document.getElementById('cust_phone').value = '';
+                document.querySelector('input[name="remark"]').value = '';
+                document.getElementById('discount_type').value = 'percent';
+                document.getElementById('discount_value').value = '0';
+                clearPosState();
+                renderCart();
+                renderHeldOrdersList();
+            }
+            function resumeHeldOrder(index) {
+                const held = getHeldOrders();
+                const item = held[index];
+                if (!item) return;
+                if (cart.length > 0) {
+                    if (!confirm('当前订单还有未结账的项目，继续这个暂存单会覆盖掉当前内容，确定吗？')) return;
+                }
+                cart = item.cart || [];
+                document.getElementById('cust_name').value = item.cust_name || '';
+                document.getElementById('cust_phone').value = item.cust_phone || '';
+                document.getElementById('discount_type').value = item.discount_type || 'percent';
+                document.getElementById('discount_value').value = item.discount_value || '0';
+                document.querySelector('input[name="remark"]').value = item.remark || '';
+                held.splice(index, 1);
+                setHeldOrders(held);
+                renderCart();
+                renderHeldOrdersList();
+            }
+            function deleteHeldOrder(index) {
+                if (!confirm('确定删除这个暂存单吗？里面的内容会丢失。')) return;
+                const held = getHeldOrders();
+                held.splice(index, 1);
+                setHeldOrders(held);
+                renderHeldOrdersList();
+            }
+            function renderHeldOrdersList() {
+                const held = getHeldOrders();
+                const panel = document.getElementById('held_orders_panel');
+                const list = document.getElementById('held_orders_list');
+                if (held.length === 0) { panel.classList.add('hidden'); list.innerHTML = ''; return; }
+                panel.classList.remove('hidden');
+                list.innerHTML = held.map((item, i) => {
+                    const total = (item.cart || []).reduce((s, it) => s + it.price, 0);
+                    const name = item.cust_name || '未命名顾客';
+                    return `<div class="flex items-center justify-between bg-white rounded-lg px-2.5 py-2 text-xs border border-amber-100">
+                        <div class="cursor-pointer flex-grow" onclick="resumeHeldOrder(${i})">
+                            <span class="font-bold text-gray-800">${name}</span>
+                            <span class="text-gray-400">· ${item.cart.length}件 · RM${total.toFixed(2)} · ${item.savedAt}</span>
+                        </div>
+                        <button type="button" onclick="deleteHeldOrder(${i})" class="text-red-400 font-bold px-1.5">×</button>
+                    </div>`;
+                }).join('');
+            }
 
             function filterPOS(cat) {
                 if (cat !== undefined) currentCat = cat;
