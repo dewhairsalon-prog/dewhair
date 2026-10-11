@@ -15,7 +15,7 @@ from flask import (
 )
 
 app = Flask(__name__)
-APP_BUILD_VERSION = "2026-10-02-v7"  # 每次交付新文件都手动改一下这行，方便部署后一眼确认版本对不对
+APP_BUILD_VERSION = "2026-10-05-v8"  # 每次交付新文件都手动改一下这行，方便部署后一眼确认版本对不对
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", secrets.token_hex(32))
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "123456")
 
@@ -1632,12 +1632,13 @@ ADMIN_APPOINTMENTS_TEMPLATE = """
                                 {% for block in timeline_blocks.get(col.key, []) %}
                                 <div onclick="event.stopPropagation();" class="absolute left-1 right-1 rounded-lg border-l-4 px-2 py-1 overflow-hidden shadow-sm hover:shadow-md transition cursor-default" style="top: {{ "%.0f"|format(block.top) }}px; height: {{ "%.0f"|format(block.height) }}px; background:{{ block.color.bg }}; border-color:{{ block.color.border }};">
                                     <div class="flex justify-between items-start gap-1">
-                                        <div class="min-w-0 cursor-pointer" onclick="openCustQuickModal('{{ block.customer_id }}', '{{ block.customer_name|e }}', '{{ block.customer_phone }}', '{{ block.id }}')">
+                                        <div class="min-w-0 cursor-pointer" onclick="openCustQuickModal('{{ block.customer_id }}', '{{ block.customer_name|e }}', '{{ block.customer_phone }}', '{{ block.id }}', '{{ block.stylist }}', '{{ block.start_date }}', '{{ block.start_hm }}')">
                                             <div class="text-[11px] font-bold truncate underline decoration-dotted" style="color:{{ block.color.text }};">{{ block.customer_name }}</div>
                                             <div class="text-[10px] text-gray-600 truncate">{{ block.service_name }}</div>
                                             <div class="text-[9px] text-gray-400">{{ block.time_range }}</div>
                                         </div>
                                         <div class="flex flex-col items-end gap-0.5 flex-shrink-0">
+                                            <button type="button" onclick="event.stopPropagation(); openRescheduleModal('{{ block.id }}', '{{ block.stylist }}', '{{ block.start_date }}', '{{ block.start_hm }}')" class="text-[11px] font-bold text-amber-500 hover:text-amber-700">✏️</button>
                                             <a href="/admin/appointment/whatsapp/{{ block.id }}" onclick="event.stopPropagation();" target="_blank" class="text-[11px] font-bold text-green-500 hover:text-green-700">💬</a>
                                             <a href="/admin/appointment/delete/{{ block.id }}" onclick="event.stopPropagation(); return confirm('确定取消此预约吗？')" class="text-[11px] font-bold text-red-400 hover:text-red-600">×</a>
                                         </div>
@@ -1672,12 +1673,13 @@ ADMIN_APPOINTMENTS_TEMPLATE = """
                         {% for app in appointments %}
                         <tr class="border-b hover:bg-gray-50">
                             <td class="p-3 font-bold text-indigo-600">{{ app.start_time.split()[1] }} ~ {{ app.end_time.split()[1] }}</td>
-                            <td class="p-3 font-bold text-indigo-600 cursor-pointer underline decoration-dotted" onclick="openCustQuickModal('{{ app.customer_id }}', '{{ app.customer_name|e }}', '{{ app.customer_phone }}', '{{ app.id }}')">{{ app.customer_name }}</td>
+                            <td class="p-3 font-bold text-indigo-600 cursor-pointer underline decoration-dotted" onclick="openCustQuickModal('{{ app.customer_id }}', '{{ app.customer_name|e }}', '{{ app.customer_phone }}', '{{ app.id }}', '{{ app.stylist }}', '{{ app.start_time.split(' ')[0] }}', '{{ app.start_time.split(' ')[1] }}')">{{ app.customer_name }}</td>
                             <td class="p-3 text-gray-600">{{ app.customer_phone }}</td>
                             <td class="p-3">{{ app.service_name }}</td>
                             <td class="p-3 font-medium text-gray-800">{{ app.stylist }}</td>
                             <td class="p-3"><span class="bg-green-100 text-green-800 px-2 py-1 rounded text-xs font-bold">{{ app.status }}</span></td>
                             <td class="p-3 flex gap-2 items-center">
+                                <button type="button" onclick="openRescheduleModal('{{ app.id }}', '{{ app.stylist }}', '{{ app.start_time.split(' ')[0] }}', '{{ app.start_time.split(' ')[1] }}')" class="bg-amber-500 text-white px-2.5 py-1 rounded text-xs font-bold hover:bg-amber-600">✏️ 改期</button>
                                 <a href="/admin/appointment/whatsapp/{{ app.id }}" target="_blank" class="bg-green-600 text-white px-2.5 py-1 rounded text-xs font-bold hover:bg-green-700">💬 WhatsApp</a>
                                 <a href="/admin/appointment/delete/{{ app.id }}" onclick="return confirm('确定取消此预约吗？')" class="text-red-500 hover:text-red-700 text-sm font-bold">删除</a>
                             </td>
@@ -1763,6 +1765,7 @@ ADMIN_APPOINTMENTS_TEMPLATE = """
                 <button onclick="closeCustQuickModal()" class="text-gray-400 font-bold text-xl">&times;</button>
             </div>
             <div class="space-y-2">
+                <button type="button" id="cq_reschedule_btn" onclick="openRescheduleFromQuickModal()" class="w-full bg-amber-500 text-white text-center font-bold py-2.5 rounded-lg hover:bg-amber-600 text-sm">✏️ 改期（换时间/发型师）</button>
                 <a id="cq_pos_link" href="#" class="block bg-green-600 text-white text-center font-bold py-2.5 rounded-lg hover:bg-green-700 text-sm">💳 收银开单</a>
                 <a id="cq_profile_link" href="#" class="block bg-indigo-600 text-white text-center font-bold py-2.5 rounded-lg hover:bg-indigo-700 text-sm">👤 查看会员资料</a>
                 <a id="cq_whatsapp_link" href="#" target="_blank" class="block bg-gray-100 text-gray-700 text-center font-bold py-2.5 rounded-lg hover:bg-gray-200 text-sm">💬 发送预约详情 (WhatsApp)</a>
@@ -1771,18 +1774,75 @@ ADMIN_APPOINTMENTS_TEMPLATE = """
         </div>
     </div>
 
+    <!-- 改期弹窗 -->
+    <div id="rescheduleModal" class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 hidden">
+        <div class="bg-white p-6 rounded-2xl shadow-xl max-w-sm w-full">
+            <div class="flex justify-between items-center mb-4">
+                <h3 class="text-lg font-bold text-amber-600">✏️ 改期</h3>
+                <button type="button" onclick="closeRescheduleModal()" class="text-gray-400 font-bold text-xl">&times;</button>
+            </div>
+            <form id="rescheduleForm" method="POST">
+                <div class="mb-3">
+                    <label class="block text-sm font-bold mb-1">发型师</label>
+                    <select name="stylist" id="reschedule_stylist" class="w-full border rounded p-2 text-sm" required>
+                        {% for st in stylists %}
+                        <option value="{{ st.name }} ({{ st.title }})">{{ st.name }} ({{ st.title }})</option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div class="grid grid-cols-2 gap-3 mb-4">
+                    <div>
+                        <label class="block text-sm font-bold mb-1">新日期</label>
+                        <input type="date" name="booking_date" id="reschedule_date" class="w-full border rounded p-2 text-sm" required>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-bold mb-1">新时间</label>
+                        <select name="booking_time" id="reschedule_time" class="w-full border rounded p-2 text-sm" required>
+                            {% for t in timeslots %}
+                            <option value="{{ t }}">{{ t }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                </div>
+                <div class="flex justify-end gap-2">
+                    <button type="button" onclick="closeRescheduleModal()" class="bg-gray-300 px-4 py-2 rounded text-sm font-bold">取消</button>
+                    <button type="submit" class="bg-amber-500 text-white px-4 py-2 rounded text-sm font-bold hover:bg-amber-600">确认改期</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
     <script>
-        function openCustQuickModal(customerId, name, phone, appointmentId) {
+        let cqCurrentAppointment = null;
+        function openCustQuickModal(customerId, name, phone, appointmentId, stylist, startDate, startHm) {
             document.getElementById('cq_name').innerText = name;
             document.getElementById('cq_phone').innerText = phone;
             document.getElementById('cq_pos_link').href = '/admin/pos?customer_id=' + customerId;
             document.getElementById('cq_profile_link').href = '/admin/customers?id=' + customerId;
             document.getElementById('cq_whatsapp_link').href = '/admin/appointment/whatsapp/' + appointmentId;
             document.getElementById('cq_cancel_link').href = '/admin/appointment/delete/' + appointmentId;
+            cqCurrentAppointment = {id: appointmentId, stylist: stylist, date: startDate, time: startHm};
             document.getElementById('custQuickModal').classList.remove('hidden');
         }
         function closeCustQuickModal() {
             document.getElementById('custQuickModal').classList.add('hidden');
+        }
+        function openRescheduleFromQuickModal() {
+            if (!cqCurrentAppointment) return;
+            closeCustQuickModal();
+            openRescheduleModal(cqCurrentAppointment.id, cqCurrentAppointment.stylist, cqCurrentAppointment.date, cqCurrentAppointment.time);
+        }
+        function openRescheduleModal(appointmentId, stylist, date, time) {
+            document.getElementById('rescheduleForm').action = '/admin/appointment/reschedule/' + appointmentId;
+            const stylistSelect = document.getElementById('reschedule_stylist');
+            for (const opt of stylistSelect.options) { if (opt.value === stylist) { stylistSelect.value = stylist; break; } }
+            document.getElementById('reschedule_date').value = date;
+            const timeSelect = document.getElementById('reschedule_time');
+            for (const opt of timeSelect.options) { if (opt.value === time) { timeSelect.value = time; break; } }
+            document.getElementById('rescheduleModal').classList.remove('hidden');
+        }
+        function closeRescheduleModal() {
+            document.getElementById('rescheduleModal').classList.add('hidden');
         }
     </script>
 
@@ -1971,6 +2031,7 @@ def admin_appointments():
             "id": a["id"], "customer_id": a["customer_id"], "customer_name": a["customer_name"], "customer_phone": a["customer_phone"],
             "service_name": a["service_name"], "status": a["status"], "stylist": a["stylist"],
             "time_range": f"{start_hm} - {end_hm}", "top": top_px, "height": height_px,
+            "start_date": a["start_time"].split(" ")[0], "start_hm": start_hm,
         }
         col = col_key_lookup.get(a["stylist"])
         if col:
@@ -2022,6 +2083,43 @@ def admin_add_appointment():
             cursor.execute("INSERT INTO appointments (customer_id, service_id, stylist, start_time, end_time) VALUES (%s, %s, %s, %s, %s)", (cust_id, service_id, stylist, start_str, end_str))
             conn.commit()
         
+    return redirect(url_for("admin_appointments", date=b_date))
+
+@app.route("/admin/appointment/reschedule/<int:id>", methods=["POST"])
+@admin_required
+def admin_appointment_reschedule(id):
+    b_date = request.form.get("booking_date")
+    b_time = request.form.get("booking_time")
+    new_stylist = request.form.get("stylist")
+    buffer_minutes = get_int_setting("buffer_minutes", 0, minimum=0)
+
+    with get_db() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute("""
+                SELECT a.*, s.duration FROM appointments a
+                JOIN services s ON a.service_id = s.id
+                WHERE a.id = %s
+            """, (id,))
+            appt = cursor.fetchone()
+            if not appt:
+                return redirect(url_for("admin_appointments", error="找不到这个预约"))
+
+            stylist = new_stylist or appt["stylist"]
+            duration = appt["duration"] or 30
+            start_dt = datetime.strptime(f"{b_date} {b_time}", "%Y-%m-%d %H:%M")
+            end_dt = start_dt + timedelta(minutes=duration)
+            start_str = start_dt.strftime("%Y-%m-%d %H:%M")
+            end_str = end_dt.strftime("%Y-%m-%d %H:%M")
+
+            if find_conflicting_appointment(cursor, stylist, start_str, end_str, exclude_id=id, buffer_minutes=buffer_minutes):
+                return redirect(url_for("admin_appointments", date=b_date, error="改期失败：该发型师这个新时间段已经有其他预约了"))
+
+            cursor.execute(
+                "UPDATE appointments SET stylist = %s, start_time = %s, end_time = %s WHERE id = %s",
+                (stylist, start_str, end_str, id)
+            )
+            conn.commit()
+
     return redirect(url_for("admin_appointments", date=b_date))
 
 @app.route("/admin/appointment/delete/<int:id>")
