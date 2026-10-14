@@ -15,7 +15,7 @@ from flask import (
 )
 
 app = Flask(__name__)
-APP_BUILD_VERSION = "2026-10-05-v8"  # 每次交付新文件都手动改一下这行，方便部署后一眼确认版本对不对
+APP_BUILD_VERSION = "2026-10-05-v9"  # 每次交付新文件都手动改一下这行，方便部署后一眼确认版本对不对
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", secrets.token_hex(32))
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "123456")
 
@@ -2199,6 +2199,21 @@ def admin_orders():
 
         filtered_total = sum(o["total_amount"] for o in orders if o["status"] == "NORMAL")
         filtered_count = sum(1 for o in orders if o["status"] == "NORMAL")
+
+        # 按月份分组（orders 已经按时间倒序排列，顺序分组即可保持从新到旧）
+        order_month_groups = []
+        om_lookup = {}
+        for o in orders:
+            month_key = o["created_at"][:7]
+            if month_key not in om_lookup:
+                group = {"month": month_key, "orders": [], "total": 0.0, "count": 0}
+                om_lookup[month_key] = group
+                order_month_groups.append(group)
+            g = om_lookup[month_key]
+            g["orders"].append(o)
+            if o["status"] == "NORMAL":
+                g["total"] += o["total_amount"]
+                g["count"] += 1
         
     return render_template_string(LAYOUT_TEMPLATE.replace("{% block content %}{% endblock %}", """
         <div class="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-4">
@@ -2232,51 +2247,59 @@ def admin_orders():
                 </form>
             </div>
             
-            <table class="w-full text-left border-collapse">
-                <thead>
-                    <tr class="border-b bg-gray-50 text-sm">
-                        <th class="p-2">单号</th>
-                        <th class="p-2">时间</th>
-                        <th class="p-2">顾客姓名与电话</th>
-                        <th class="p-2">金额 (RM)</th>
-                        <th class="p-2">支付/状态</th>
-                        <th class="p-2">备注</th>
-                        <th class="p-2">操作</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {% for order in orders %}
-                    <tr class="border-b {% if order.status == 'VOID' %}bg-red-50 text-gray-400 line-through{% endif %}">
-                        <td class="p-2 font-bold text-indigo-600">
-                            <a href="/admin/order/invoice/{{ order.id }}" class="underline hover:text-indigo-800">{{ order.order_no }}</a>
-                        </td>
-                        <td class="p-2">{{ order.created_at }}</td>
-                        <td class="p-2">{{ order.customer_name }} ({{ order.customer_phone }})</td>
-                        <td class="p-2 font-bold">RM {{ "%.2f"|format(order.total_amount) }}</td>
-                        <td class="p-2 font-bold">{% if order.status == 'VOID' %}<span class="text-red-600">【已作废】</span>{% else %}{{ order.payment_details }}{% endif %}</td>
-                        <td class="p-2">
-                            <form action="/admin/order/remark/{{ order.id }}" method="POST" class="flex gap-1 items-center">
-                                <input type="text" name="remark" value="{{ order.remark or '' }}" placeholder="备注..." class="border rounded px-2 py-1 text-xs w-32">
-                                <button class="bg-gray-200 hover:bg-gray-300 text-gray-700 px-2 py-1 rounded text-xs font-bold">保存</button>
-                            </form>
-                        </td>
-                        <td class="p-2 flex gap-2 items-center text-sm">
-                            <a href="/admin/order/invoice/{{ order.id }}" class="text-indigo-600 font-bold hover:underline">查看/下载</a>
-                            <a href="/admin/order/whatsapp/{{ order.id }}" target="_blank" class="bg-green-600 text-white px-2.5 py-1 rounded font-bold hover:bg-green-700 text-xs flex items-center gap-1">
-                                💬 WhatsApp
-                            </a>
-                            {% if order.status != 'VOID' %}
-                            <a href="/admin/order/void/{{ order.id }}" onclick="return confirm('确定作废此订单吗？')" class="text-red-500 font-bold">作废</a>
-                            {% endif %}
-                        </td>
-                    </tr>
-                    {% else %}
-                    <tr><td colspan="7" class="p-6 text-center text-gray-400">没有找到相关历史订单</td></tr>
-                    {% endfor %}
-                </tbody>
-            </table>
+            {% for g in order_month_groups %}
+            <details class="border border-gray-100 rounded-xl overflow-hidden" {% if loop.first %}open{% endif %}>
+                <summary class="cursor-pointer bg-gray-50 px-4 py-3 flex justify-between items-center font-bold text-gray-800 hover:bg-gray-100">
+                    <span>{{ g.month }}</span>
+                    <span class="text-sm font-normal text-gray-500">{{ g.count }} 笔 · <span class="text-green-600 font-bold">RM {{ "%.2f"|format(g.total) }}</span></span>
+                </summary>
+                <table class="w-full text-left border-collapse">
+                    <thead>
+                        <tr class="border-b bg-gray-50 text-xs text-gray-400">
+                            <th class="p-2">单号</th>
+                            <th class="p-2">时间</th>
+                            <th class="p-2">顾客姓名与电话</th>
+                            <th class="p-2">金额 (RM)</th>
+                            <th class="p-2">支付/状态</th>
+                            <th class="p-2">备注</th>
+                            <th class="p-2">操作</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for order in g.orders %}
+                        <tr class="border-b {% if order.status == 'VOID' %}bg-red-50 text-gray-400 line-through{% endif %}">
+                            <td class="p-2 font-bold text-indigo-600">
+                                <a href="/admin/order/invoice/{{ order.id }}" class="underline hover:text-indigo-800">{{ order.order_no }}</a>
+                            </td>
+                            <td class="p-2">{{ order.created_at }}</td>
+                            <td class="p-2">{{ order.customer_name }} ({{ order.customer_phone }})</td>
+                            <td class="p-2 font-bold">RM {{ "%.2f"|format(order.total_amount) }}</td>
+                            <td class="p-2 font-bold">{% if order.status == 'VOID' %}<span class="text-red-600">【已作废】</span>{% else %}{{ order.payment_details }}{% endif %}</td>
+                            <td class="p-2">
+                                <form action="/admin/order/remark/{{ order.id }}" method="POST" class="flex gap-1 items-center">
+                                    <input type="text" name="remark" value="{{ order.remark or '' }}" placeholder="备注..." class="border rounded px-2 py-1 text-xs w-32">
+                                    <button class="bg-gray-200 hover:bg-gray-300 text-gray-700 px-2 py-1 rounded text-xs font-bold">保存</button>
+                                </form>
+                            </td>
+                            <td class="p-2 flex gap-2 items-center text-sm">
+                                <a href="/admin/order/invoice/{{ order.id }}" class="text-indigo-600 font-bold hover:underline">查看/下载</a>
+                                <a href="/admin/order/whatsapp/{{ order.id }}" target="_blank" class="bg-green-600 text-white px-2.5 py-1 rounded font-bold hover:bg-green-700 text-xs flex items-center gap-1">
+                                    💬 WhatsApp
+                                </a>
+                                {% if order.status != 'VOID' %}
+                                <a href="/admin/order/void/{{ order.id }}" onclick="return confirm('确定作废此订单吗？')" class="text-red-500 font-bold">作废</a>
+                                {% endif %}
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </details>
+            {% else %}
+            <p class="p-6 text-center text-gray-400">没有找到相关历史订单</p>
+            {% endfor %}
         </div>
-    """), orders=orders, search_q=search_q, date_q=date_q, today_summary=today_summary, month_summary=month_summary, filtered_total=filtered_total, filtered_count=filtered_count)
+    """), orders=orders, search_q=search_q, date_q=date_q, today_summary=today_summary, month_summary=month_summary, filtered_total=filtered_total, filtered_count=filtered_count, order_month_groups=order_month_groups)
 
 @app.route("/admin/order/remark/<int:id>", methods=["POST"])
 @admin_required
@@ -2556,30 +2579,52 @@ def admin_reports():
                 cnt = row["cnt"] if row and row["cnt"] else 0
                 total = row["total"] if row and row["total"] else 0.0
                 days_data.append({"date_str": d_str, "count": cnt, "total": total})
-            
+
+    # 按月份分组，每个月一个可折叠区块，带当月小计
+    month_groups = []
+    month_lookup = {}
+    for d in days_data:
+        month_key = d["date_str"][:7]
+        if month_key not in month_lookup:
+            group = {"month": month_key, "days": [], "total": 0.0, "count": 0}
+            month_lookup[month_key] = group
+            month_groups.append(group)
+        g = month_lookup[month_key]
+        g["days"].append(d)
+        g["total"] += d["total"]
+        g["count"] += d["count"]
+
     return render_template_string(LAYOUT_TEMPLATE.replace("{% block content %}{% endblock %}", """
-        <div class="bg-white p-6 rounded shadow space-y-4">
-            <h2 class="text-xl font-bold text-indigo-600">📊 最近 90 天营业报表</h2>
-            <table class="w-full text-left border-collapse">
-                <thead>
-                    <tr class="border-b bg-gray-50 text-sm">
-                        <th class="p-2">日期</th>
-                        <th class="p-2">完成订单数</th>
-                        <th class="p-2">营业额 (RM)</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {% for d in days_data %}
-                    <tr class="border-b hover:bg-gray-50">
-                        <td class="p-2 font-bold">{{ d.date_str }}</td>
-                        <td class="p-2">{{ d.count }} 单</td>
-                        <td class="p-2 font-bold text-green-600">RM {{ "%.2f"|format(d.total) }}</td>
-                    </tr>
-                    {% endfor %}
-                </tbody>
-            </table>
+        <div class="bg-white p-6 rounded shadow space-y-3">
+            <h2 class="text-xl font-bold text-indigo-600">📊 最近 90 天营业报表（按月分组）</h2>
+            {% for g in month_groups %}
+            <details class="border border-gray-100 rounded-xl overflow-hidden" {% if loop.first %}open{% endif %}>
+                <summary class="cursor-pointer bg-gray-50 px-4 py-3 flex justify-between items-center font-bold text-gray-800 hover:bg-gray-100">
+                    <span>{{ g.month }}</span>
+                    <span class="text-sm font-normal text-gray-500">{{ g.count }} 单 · <span class="text-green-600 font-bold">RM {{ "%.2f"|format(g.total) }}</span></span>
+                </summary>
+                <table class="w-full text-left border-collapse">
+                    <thead>
+                        <tr class="border-b bg-gray-50 text-xs text-gray-400">
+                            <th class="p-2">日期</th>
+                            <th class="p-2">完成订单数</th>
+                            <th class="p-2">营业额 (RM)</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for d in g.days %}
+                        <tr class="border-b hover:bg-gray-50">
+                            <td class="p-2 font-bold">{{ d.date_str }}</td>
+                            <td class="p-2">{{ d.count }} 单</td>
+                            <td class="p-2 font-bold text-green-600">RM {{ "%.2f"|format(d.total) }}</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </details>
+            {% endfor %}
         </div>
-    """), days_data=days_data)
+    """), month_groups=month_groups)
 
 def get_staff_payroll(month_prefix):
     """按月汇总每位员工的销售额与佣金（新版协作记录 + 兼容更新前的旧版单员工记录）"""
