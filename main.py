@@ -15,7 +15,7 @@ from flask import (
 )
 
 app = Flask(__name__)
-APP_BUILD_VERSION = "2026-10-05-v9"  # 每次交付新文件都手动改一下这行，方便部署后一眼确认版本对不对
+APP_BUILD_VERSION = "2026-10-05-v10"  # 每次交付新文件都手动改一下这行，方便部署后一眼确认版本对不对
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", secrets.token_hex(32))
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "123456")
 
@@ -2200,18 +2200,27 @@ def admin_orders():
         filtered_total = sum(o["total_amount"] for o in orders if o["status"] == "NORMAL")
         filtered_count = sum(1 for o in orders if o["status"] == "NORMAL")
 
-        # 按月份分组（orders 已经按时间倒序排列，顺序分组即可保持从新到旧）
+        # 按月份分组，月份里再按天分组（orders 已经按时间倒序排列，顺序分组即可保持从新到旧）
         order_month_groups = []
         om_lookup = {}
+        od_lookup = {}
         for o in orders:
             month_key = o["created_at"][:7]
+            day_key = o["created_at"][:10]
             if month_key not in om_lookup:
-                group = {"month": month_key, "orders": [], "total": 0.0, "count": 0}
+                group = {"month": month_key, "days": [], "total": 0.0, "count": 0}
                 om_lookup[month_key] = group
                 order_month_groups.append(group)
             g = om_lookup[month_key]
-            g["orders"].append(o)
+            if day_key not in od_lookup:
+                day_group = {"day": day_key, "orders": [], "total": 0.0, "count": 0}
+                od_lookup[day_key] = day_group
+                g["days"].append(day_group)
+            dg = od_lookup[day_key]
+            dg["orders"].append(o)
             if o["status"] == "NORMAL":
+                dg["total"] += o["total_amount"]
+                dg["count"] += 1
                 g["total"] += o["total_amount"]
                 g["count"] += 1
         
@@ -2266,7 +2275,13 @@ def admin_orders():
                         </tr>
                     </thead>
                     <tbody>
-                        {% for order in g.orders %}
+                        {% for dg in g.days %}
+                        <tr class="bg-indigo-50">
+                            <td colspan="7" class="px-2 py-1.5 text-xs font-bold text-indigo-700">
+                                📅 {{ dg.day }} — {{ dg.count }} 笔 · RM {{ "%.2f"|format(dg.total) }}
+                            </td>
+                        </tr>
+                        {% for order in dg.orders %}
                         <tr class="border-b {% if order.status == 'VOID' %}bg-red-50 text-gray-400 line-through{% endif %}">
                             <td class="p-2 font-bold text-indigo-600">
                                 <a href="/admin/order/invoice/{{ order.id }}" class="underline hover:text-indigo-800">{{ order.order_no }}</a>
@@ -2291,6 +2306,7 @@ def admin_orders():
                                 {% endif %}
                             </td>
                         </tr>
+                        {% endfor %}
                         {% endfor %}
                     </tbody>
                 </table>
