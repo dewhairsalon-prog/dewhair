@@ -15,7 +15,7 @@ from flask import (
 )
 
 app = Flask(__name__)
-APP_BUILD_VERSION = "2026-10-05-v10"  # 每次交付新文件都手动改一下这行，方便部署后一眼确认版本对不对
+APP_BUILD_VERSION = "2026-10-15-v11"  # 每次交付新文件都手动改一下这行，方便部署后一眼确认版本对不对
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", secrets.token_hex(32))
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "123456")
 
@@ -2884,12 +2884,27 @@ def admin_pos():
                 </div>
                 <div class="text-sm text-gray-500 flex justify-between mb-1"><span>小计</span><span>RM <span id="subtotal-amount">0.00</span></span></div>
                 <div class="text-sm text-red-500 flex justify-between mb-1" id="discount-row" style="display:none;"><span>折扣</span><span>- RM <span id="discount-amount">0.00</span></span></div>
-                <div class="text-lg font-bold mb-4 flex justify-between border-t border-gray-100 pt-2"><span class="text-gray-700 text-sm font-medium">应付总额</span><span class="text-red-600">RM <span id="total-amount">0.00</span></span></div>
+                <div class="text-sm text-gray-400 flex justify-between mb-2 border-t border-gray-100 pt-2"><span>计算应付</span><span>RM <span id="calculated-total">0.00</span></span></div>
+                <div class="flex items-center justify-between mb-4 bg-gray-50 rounded-xl p-3">
+                    <div>
+                        <div class="text-xs font-bold text-gray-700">实收金额（可手动改）</div>
+                        <div class="text-[10px] text-gray-400">存款/顾客多给/抹零都可以直接改这里</div>
+                    </div>
+                    <div class="flex items-center gap-1">
+                        <span class="text-red-600 font-bold text-sm">RM</span>
+                        <input type="number" id="actual_amount_input" step="0.01" min="0" oninput="onActualAmountEdited()" class="w-24 border-2 border-red-200 rounded-lg p-1.5 text-right font-bold text-red-600 text-lg">
+                    </div>
+                </div>
+                <div id="amount-override-hint" class="hidden text-xs text-amber-600 font-semibold mb-3 flex justify-between items-center bg-amber-50 rounded-lg px-3 py-2">
+                    <span>⚠️ 实收金额已手动修改，跟计算出来的应付金额不一样</span>
+                    <button type="button" onclick="resetActualAmount()" class="underline font-bold flex-shrink-0 ml-2">重置</button>
+                </div>
                 
                 <form action="/admin/checkout" method="POST" onsubmit="clearPosState()">
                     <input type="hidden" name="cart_data" id="cart_data_input">
                     <input type="hidden" name="discount_type" id="discount_type_input" value="percent">
                     <input type="hidden" name="discount_value" id="discount_value_input" value="0">
+                    <input type="hidden" name="actual_amount" id="actual_amount_form_input" value="0">
                     {% if prefill_customer %}
                     <div class="mb-3 p-2.5 bg-indigo-50 border border-indigo-100 rounded-lg text-xs text-indigo-700 font-semibold">
                         👤 已带入顾客: {{ prefill_customer.name }} ({{ prefill_customer.phone }})
@@ -2965,6 +2980,8 @@ def admin_pos():
                         discount_type: document.getElementById('discount_type').value,
                         discount_value: document.getElementById('discount_value').value,
                         remark: document.querySelector('input[name="remark"]').value,
+                        actual_amount: document.getElementById('actual_amount_input').value,
+                        actual_amount_edited: actualAmountManuallyEdited,
                     }));
                 } catch (e) {}
             }
@@ -2983,6 +3000,10 @@ def admin_pos():
                 if (saved.discount_type) document.getElementById('discount_type').value = saved.discount_type;
                 if (saved.discount_value) document.getElementById('discount_value').value = saved.discount_value;
                 if (saved.remark) document.querySelector('input[name="remark"]').value = saved.remark;
+                if (saved.actual_amount_edited) {
+                    actualAmountManuallyEdited = true;
+                    document.getElementById('actual_amount_input').value = saved.actual_amount || '0';
+                }
                 renderCart();
             }
             document.addEventListener('DOMContentLoaded', function() {
@@ -3219,11 +3240,38 @@ def admin_pos():
                 document.getElementById('subtotal-amount').innerText = subtotal.toFixed(2);
                 document.getElementById('discount-row').style.display = discountAmt > 0 ? 'flex' : 'none';
                 document.getElementById('discount-amount').innerText = discountAmt.toFixed(2);
-                document.getElementById('total-amount').innerText = finalTotal.toFixed(2);
+                document.getElementById('calculated-total').innerText = finalTotal.toFixed(2);
                 document.getElementById('discount_type_input').value = discountType;
                 document.getElementById('discount_value_input').value = discountValue;
                 document.getElementById('cart_data_input').value = JSON.stringify(cart);
+
+                // 实收金额：只要顾客/收银员没有手动改过，就跟着计算结果自动同步；改过了就不再自动覆盖
+                if (!actualAmountManuallyEdited) {
+                    document.getElementById('actual_amount_input').value = finalTotal.toFixed(2);
+                }
+                document.getElementById('actual_amount_form_input').value = document.getElementById('actual_amount_input').value;
+                checkAmountOverride();
                 savePosState();
+            }
+
+            let actualAmountManuallyEdited = false;
+            function onActualAmountEdited() {
+                actualAmountManuallyEdited = true;
+                document.getElementById('actual_amount_form_input').value = document.getElementById('actual_amount_input').value;
+                checkAmountOverride();
+                savePosState();
+            }
+            function resetActualAmount() {
+                actualAmountManuallyEdited = false;
+                document.getElementById('actual_amount_input').value = document.getElementById('calculated-total').innerText;
+                document.getElementById('actual_amount_form_input').value = document.getElementById('actual_amount_input').value;
+                checkAmountOverride();
+                savePosState();
+            }
+            function checkAmountOverride() {
+                const calc = parseFloat(document.getElementById('calculated-total').innerText) || 0;
+                const actual = parseFloat(document.getElementById('actual_amount_input').value) || 0;
+                document.getElementById('amount-override-hint').classList.toggle('hidden', Math.abs(calc - actual) < 0.005);
             }
 
             const POS_CUSTOMERS = {{ customers_json|safe }};
@@ -3285,7 +3333,19 @@ def checkout():
             discount_value = min(discount_value, 100.0)
             discount_amount = round(subtotal * (discount_value / 100), 2)
             discount_percent_stored = discount_value
-        total = round(subtotal - discount_amount, 2)
+        calculated_total = round(subtotal - discount_amount, 2)
+
+        # 实收金额：收银台可以手动改成跟计算结果不一样的数字（比如订金、顾客多给、抹零），这里就按实际收的这个数来记账
+        try:
+            actual_amount = float(request.form.get("actual_amount", calculated_total) or calculated_total)
+        except (TypeError, ValueError):
+            actual_amount = calculated_total
+        actual_amount = max(0.0, round(actual_amount, 2))
+        total = actual_amount
+
+        if abs(actual_amount - calculated_total) >= 0.01:
+            note = f"[实收 RM{actual_amount:.2f}，按单价计算应付 RM{calculated_total:.2f}]"
+            remark = f"{remark} {note}".strip() if remark else note
         
         current_time_str = get_current_time()
         order_no = "INV" + datetime.now(MY_TZ).strftime("%Y%m%d%H%M%S")
