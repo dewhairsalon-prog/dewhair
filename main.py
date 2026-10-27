@@ -15,7 +15,7 @@ from flask import (
 )
 
 app = Flask(__name__)
-APP_BUILD_VERSION = "2026-10-15-v11"  # 每次交付新文件都手动改一下这行，方便部署后一眼确认版本对不对
+APP_BUILD_VERSION = "2026-10-15-v12"  # 每次交付新文件都手动改一下这行，方便部署后一眼确认版本对不对
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", secrets.token_hex(32))
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "123456")
 
@@ -1578,6 +1578,7 @@ ADMIN_APPOINTMENTS_TEMPLATE = """
                     <label class="text-sm font-bold text-gray-700">切换日期：</label>
                     <input type="date" id="admin_date_picker" value="{{ selected_date }}" class="border rounded-lg p-2 font-medium" onchange="changeAdminDate(this.value)">
                     <button onclick="changeAdminDate('{{ today_str }}')" class="bg-gray-200 hover:bg-gray-300 text-gray-800 px-3 py-2 rounded-lg text-sm font-bold">今天</button>
+                    <button onclick="jumpAdminDays(14)" class="bg-gray-200 hover:bg-gray-300 text-gray-800 px-3 py-2 rounded-lg text-sm font-bold">+14天</button>
                     <button onclick="openAdminBookModal()" class="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-lg text-sm font-bold shadow">+ 手动代客预约</button>
                 </div>
             </div>
@@ -1852,6 +1853,12 @@ ADMIN_APPOINTMENTS_TEMPLATE = """
         const TIMELINE_SLOT_INTERVAL = {{ slot_interval_min }};
 
         function changeAdminDate(dateStr) { window.location.href = "/admin/appointments?date=" + dateStr; }
+        function jumpAdminDays(n) {
+            const current = new Date('{{ selected_date }}T00:00:00');
+            current.setDate(current.getDate() + n);
+            const y = current.getFullYear(), m = String(current.getMonth()+1).padStart(2,'0'), d = String(current.getDate()).padStart(2,'0');
+            changeAdminDate(`${y}-${m}-${d}`);
+        }
         function openAdminBookModal() { document.getElementById('adminBookModal').classList.remove('hidden'); }
         function closeAdminBookModal() { document.getElementById('adminBookModal').classList.add('hidden'); }
 
@@ -1931,12 +1938,14 @@ def admin_appointments():
     today_str = get_current_date()
     date_strip = []
     base_dt = datetime.strptime(selected_date, "%Y-%m-%d")
+    max_advance_days = get_int_setting("max_advance_days", 30, minimum=1)
+    strip_days_total = max(21, max_advance_days + 10)  # 往前留几天缓冲，往后覆盖到最大可提前预约的天数，方便直接滑动到很远的日期
     start_loop = base_dt - timedelta(days=5)
     
-    end_loop = start_loop + timedelta(days=14)
+    end_loop = start_loop + timedelta(days=strip_days_total - 1)
     with get_db() as conn:
         with conn.cursor() as cursor:
-            # 一次性查出这 15 天内每天的预约数量，避免逐天单独查询造成的多次网络往返
+            # 一次性查出整个范围内每天的预约数量，避免逐天单独查询造成的多次网络往返
             cursor.execute("""
                 SELECT LEFT(start_time, 10) as day_str, COUNT(*) as cnt
                 FROM appointments
@@ -1945,7 +1954,7 @@ def admin_appointments():
             """, (start_loop.strftime("%Y-%m-%d"), (end_loop + timedelta(days=1)).strftime("%Y-%m-%d")))
             counts_map = {row["day_str"]: row["cnt"] for row in cursor.fetchall()}
 
-            for i in range(15):
+            for i in range(strip_days_total):
                 d = start_loop + timedelta(days=i)
                 d_str = d.strftime("%Y-%m-%d")
                 wd_map = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
@@ -2944,9 +2953,22 @@ def admin_pos():
         <!-- 协作员工与佣金配置弹窗 -->
         <div id="staffModal" class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 hidden">
             <div class="bg-white p-6 rounded-xl shadow-xl max-w-md w-full max-h-[85vh] overflow-y-auto">
-                <h3 class="text-lg font-bold mb-1 text-indigo-600">设置协作员工与佣金</h3>
+                <h3 class="text-lg font-bold mb-1 text-indigo-600">编辑这个项目</h3>
                 <p id="modal_item_name" class="text-sm font-medium text-gray-700 mb-3"></p>
 
+                <div class="mb-4 bg-amber-50 border border-amber-100 rounded-lg p-3">
+                    <div class="flex items-center justify-between mb-1">
+                        <label class="text-xs font-bold text-gray-700">这个项目的价格（可单独改，比如打折/调价）</label>
+                        <span class="text-[10px] text-gray-400">原价 RM <span id="modal_original_price">0.00</span></span>
+                    </div>
+                    <div class="flex items-center gap-1">
+                        <span class="text-amber-700 font-bold text-sm">RM</span>
+                        <input type="number" id="modal_item_price" step="0.01" min="0" oninput="onItemPriceEdited()" class="w-28 border-2 border-amber-200 rounded-lg p-1.5 text-right font-bold text-amber-700">
+                        <button type="button" onclick="resetItemPrice()" class="text-xs text-indigo-600 underline font-bold ml-1">恢复原价</button>
+                    </div>
+                </div>
+
+                <h4 class="text-sm font-bold text-gray-700 mb-2">协作员工与佣金</h4>
                 <div id="collaborator_list" class="space-y-2 mb-3"></div>
 
                 <button type="button" onclick="addCollaboratorRow()" class="w-full border-2 border-dashed border-indigo-300 text-indigo-600 font-bold py-2 rounded text-sm hover:bg-indigo-50 mb-4">
@@ -3105,7 +3127,7 @@ def admin_pos():
             }
 
             function addToOrder(name, price) {
-                cart.push({name, price, collaborators: []});
+                cart.push({name, price, original_price: price, collaborators: []});
                 renderCart();
             }
 
@@ -3122,12 +3144,35 @@ def admin_pos():
             function openStaffModal(index) {
                 editingIndex = index;
                 const item = cart[index];
-                document.getElementById('modal_item_name').innerText = "项目: " + item.name + " (售价: RM " + item.price.toFixed(2) + ")";
+                if (item.original_price === undefined) item.original_price = item.price;
+                document.getElementById('modal_item_name').innerText = "项目: " + item.name;
+                document.getElementById('modal_original_price').innerText = item.original_price.toFixed(2);
+                document.getElementById('modal_item_price').value = item.price.toFixed(2);
                 if (!item.collaborators || item.collaborators.length === 0) {
                     item.collaborators = [{staff: '', commission: 0}];
                 }
                 renderCollaboratorRows(item.collaborators);
                 document.getElementById('staffModal').classList.remove('hidden');
+            }
+
+            function onItemPriceEdited() {
+                const item = cart[editingIndex];
+                if (!item) return;
+                let newPrice = parseFloat(document.getElementById('modal_item_price').value);
+                if (isNaN(newPrice) || newPrice < 0) newPrice = 0;
+                item.price = newPrice;
+                // 价格改了之后，已经选好的协作员工佣金按新的价格重新算一次建议金额
+                (item.collaborators || []).forEach(c => {
+                    if (c.staff) c.commission = calcSuggestedCommission(c.staff, item.price);
+                });
+                renderCollaboratorRows(item.collaborators || []);
+            }
+            function resetItemPrice() {
+                const item = cart[editingIndex];
+                if (!item) return;
+                item.price = item.original_price;
+                document.getElementById('modal_item_price').value = item.price.toFixed(2);
+                onItemPriceEdited();
             }
 
             function renderCollaboratorRows(collaborators) {
@@ -3211,6 +3256,10 @@ def admin_pos():
                     const staffSummary = collabs.length > 0
                         ? collabs.map(c => `${c.staff}(RM${c.commission.toFixed(2)})`).join(' + ')
                         : '无';
+                    const isDiscounted = item.original_price !== undefined && Math.abs(item.original_price - item.price) >= 0.005;
+                    const priceHtml = isDiscounted
+                        ? `<span class="text-gray-400 line-through text-xs mr-1">RM${item.original_price.toFixed(2)}</span><span class="font-bold text-amber-600">RM ${item.price.toFixed(2)}</span>`
+                        : `<span class="font-bold">RM ${item.price.toFixed(2)}</span>`;
                     container.innerHTML += `
                         <div class="flex justify-between items-center py-2 border-b text-sm">
                             <div>
@@ -3218,8 +3267,8 @@ def admin_pos():
                                 <div class="text-xs text-gray-500">协作员工: ${staffSummary}</div>
                             </div>
                             <div class="flex items-center gap-2">
-                                <span class="font-bold">RM ${item.price.toFixed(2)}</span>
-                                <button type="button" onclick="openStaffModal(${index})" class="text-indigo-600 text-xs bg-indigo-50 px-2 py-1 rounded font-bold">+ 添加协作员工</button>
+                                ${priceHtml}
+                                <button type="button" onclick="openStaffModal(${index})" class="text-indigo-600 text-xs bg-indigo-50 px-2 py-1 rounded font-bold">✎ 编辑</button>
                                 <button type="button" onclick="removeFromCart(${index})" class="text-red-500 font-bold">×</button>
                             </div>
                         </div>`;
