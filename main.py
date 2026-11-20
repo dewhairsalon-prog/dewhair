@@ -15,7 +15,7 @@ from flask import (
 )
 
 app = Flask(__name__)
-APP_BUILD_VERSION = "2026-10-15-v12"  # 每次交付新文件都手动改一下这行，方便部署后一眼确认版本对不对
+APP_BUILD_VERSION = "2026-11-20-v13"  # 每次交付新文件都手动改一下这行，方便部署后一眼确认版本对不对
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", secrets.token_hex(32))
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "123456")
 
@@ -52,7 +52,7 @@ def close_db_connection(exception=None):
         except Exception:
             pass
 
-SCHEMA_VERSION = "1"  # 每次改动数据库结构（新增表/字段）时手动加 1，才会触发下面完整的建表流程重跑一次
+SCHEMA_VERSION = "2"  # 每次改动数据库结构（新增表/字段）时手动加 1，才会触发下面完整的建表流程重跑一次
 
 def init_db():
     # 快速检查：如果数据库已经初始化过同一版本的结构，直接跳过下面一大串建表/加字段的 SQL，
@@ -145,6 +145,9 @@ def init_db():
                     FOREIGN KEY(order_id) REFERENCES orders(id) ON DELETE CASCADE
                 );
             """)
+            # 单项目折扣：记录每个项目的原价与折扣金额（旧订单这两栏为空，单据上按「没有折扣」显示）
+            cursor.execute("ALTER TABLE order_items ADD COLUMN IF NOT EXISTS original_price DOUBLE PRECISION")
+            cursor.execute("ALTER TABLE order_items ADD COLUMN IF NOT EXISTS item_discount DOUBLE PRECISION DEFAULT 0.0")
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS appointments (
                     id SERIAL PRIMARY KEY,
@@ -178,6 +181,17 @@ def init_db():
                     staff_name TEXT NOT NULL,
                     commission_amount DOUBLE PRECISION DEFAULT 0.0,
                     FOREIGN KEY(order_item_id) REFERENCES order_items(id) ON DELETE CASCADE
+                );
+            """)
+            # 会员赠送 Credit 的记录表（方便以后对账）
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS credit_logs (
+                    id SERIAL PRIMARY KEY,
+                    customer_id INTEGER NOT NULL,
+                    amount DOUBLE PRECISION NOT NULL,
+                    reason TEXT DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(customer_id) REFERENCES customers(id)
                 );
             """)
             
@@ -1368,6 +1382,7 @@ def admin_customers():
             selected_customer = None
             appointments = []
             orders = []
+            credit_logs = []
             if selected_id:
                 cursor.execute("SELECT * FROM customers WHERE id = %s", (selected_id,))
                 selected_customer = cursor.fetchone()
@@ -1386,8 +1401,12 @@ def admin_customers():
                         ORDER BY o.created_at DESC LIMIT 15
                     """, (selected_id,))
                     orders = cursor.fetchall()
+                    cursor.execute("SELECT * FROM credit_logs WHERE customer_id = %s ORDER BY id DESC LIMIT 10", (selected_id,))
+                    credit_logs = cursor.fetchall()
 
     return render_template_string(LAYOUT_TEMPLATE.replace("{% block content %}{% endblock %}", """
+        {% if error %}<div class="mb-3 p-3 bg-red-50 border border-red-200 text-red-700 rounded-lg text-sm font-bold">⚠️ {{ error }}</div>{% endif %}
+        {% if success %}<div class="mb-3 p-3 bg-green-50 border border-green-200 text-green-700 rounded-lg text-sm font-bold">✅ {{ success }}</div>{% endif %}
         <div class="flex flex-col md:flex-row gap-4" style="height: calc(100vh - 140px); min-height: 500px;">
             <!-- 左侧：会员列表 -->
             <div class="w-full md:w-80 flex-shrink-0 bg-white rounded-2xl shadow-sm border border-gray-100 flex flex-col overflow-hidden">
@@ -1430,6 +1449,10 @@ def admin_customers():
                             <h2 class="text-xl font-extrabold text-gray-900">{{ selected_customer.name }}</h2>
                             <p class="text-sm text-gray-400">{{ selected_customer.phone }} · 专属链接码: {{ selected_customer.token }}</p>
                             <a href="/customer/{{ selected_customer.token }}" target="_blank" class="text-indigo-600 text-xs font-bold hover:underline">查看顾客专属页面 →</a>
+                            <div class="flex gap-2 mt-2">
+                                <button type="button" onclick="document.getElementById('editMemberModal').classList.remove('hidden')" class="bg-gray-100 text-gray-700 text-xs font-bold px-3 py-1.5 rounded-lg hover:bg-gray-200">✏️ 编辑资料</button>
+                                <button type="button" onclick="document.getElementById('giftCreditModal').classList.remove('hidden')" class="bg-green-600 text-white text-xs font-bold px-3 py-1.5 rounded-lg hover:bg-green-700">🎁 赠送 Credit</button>
+                            </div>
                         </div>
                         <div class="text-right">
                             <div class="text-xs text-gray-400">Credit 余额</div>
@@ -1484,6 +1507,23 @@ def admin_customers():
                             </tbody>
                         </table>
                     </div>
+
+                    <div>
+                        <h3 class="font-bold text-gray-800 text-sm mb-2">🎁 Credit 赠送记录</h3>
+                        <div class="space-y-2">
+                            {% for l in credit_logs %}
+                            <div class="flex justify-between items-center bg-gray-50 rounded-lg p-3 text-sm">
+                                <div>
+                                    <div class="font-semibold text-green-600">+ RM {{ "%.2f"|format(l.amount) }}</div>
+                                    <div class="text-xs text-gray-500">{{ l.reason }}</div>
+                                </div>
+                                <div class="text-xs text-gray-400">{{ l.created_at }}</div>
+                            </div>
+                            {% else %}
+                            <p class="text-gray-400 text-sm">暂无赠送记录</p>
+                            {% endfor %}
+                        </div>
+                    </div>
                 </div>
                 {% else %}
                 <div class="h-full flex items-center justify-center text-gray-400 text-sm">从左侧选择一位会员查看详情，或先添加一位新会员</div>
@@ -1515,7 +1555,52 @@ def admin_customers():
                 </form>
             </div>
         </div>
-    """), customers=customers, search_query=search_query, selected_customer=selected_customer, appointments=appointments, orders=orders)
+
+        {% if selected_customer %}
+        <!-- 编辑会员资料弹窗 -->
+        <div id="editMemberModal" class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 hidden">
+            <div class="bg-white p-6 rounded-2xl shadow-xl max-w-sm w-full">
+                <div class="flex justify-between items-center mb-4">
+                    <h3 class="text-lg font-bold text-gray-900">编辑会员资料</h3>
+                    <button onclick="document.getElementById('editMemberModal').classList.add('hidden')" class="text-gray-400 font-bold text-xl">&times;</button>
+                </div>
+                <form action="/admin/customer/update/{{ selected_customer.id }}" method="POST">
+                    <div class="mb-3">
+                        <label class="block text-xs font-semibold text-gray-500 mb-1">会员姓名</label>
+                        <input type="text" name="name" value="{{ selected_customer.name }}" class="w-full border border-gray-200 rounded-lg p-2 text-sm" required>
+                    </div>
+                    <div class="mb-4">
+                        <label class="block text-xs font-semibold text-gray-500 mb-1">电话号码</label>
+                        <input type="text" name="phone" value="{{ selected_customer.phone }}" class="w-full border border-gray-200 rounded-lg p-2 text-sm" required>
+                    </div>
+                    <button class="w-full bg-indigo-600 text-white font-bold py-2.5 rounded-lg hover:bg-indigo-700 text-sm">保存修改</button>
+                </form>
+            </div>
+        </div>
+
+        <!-- 赠送 Credit 弹窗 -->
+        <div id="giftCreditModal" class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 hidden">
+            <div class="bg-white p-6 rounded-2xl shadow-xl max-w-sm w-full">
+                <div class="flex justify-between items-center mb-1">
+                    <h3 class="text-lg font-bold text-gray-900">🎁 赠送 Credit</h3>
+                    <button onclick="document.getElementById('giftCreditModal').classList.add('hidden')" class="text-gray-400 font-bold text-xl">&times;</button>
+                </div>
+                <p class="text-xs text-gray-400 mb-4">{{ selected_customer.name }} · 目前余额 RM {{ "%.2f"|format(selected_customer.credits) }}</p>
+                <form action="/admin/customer/credit/{{ selected_customer.id }}" method="POST">
+                    <div class="mb-3">
+                        <label class="block text-xs font-semibold text-gray-500 mb-1">赠送金额 (RM)</label>
+                        <input type="number" step="0.01" min="0.01" name="amount" class="w-full border border-gray-200 rounded-lg p-2 text-sm" required>
+                    </div>
+                    <div class="mb-4">
+                        <label class="block text-xs font-semibold text-gray-500 mb-1">原因（会记录下来）</label>
+                        <input type="text" name="reason" value="Free credit" class="w-full border border-gray-200 rounded-lg p-2 text-sm">
+                    </div>
+                    <button class="w-full bg-green-600 text-white font-bold py-2.5 rounded-lg hover:bg-green-700 text-sm">确认赠送</button>
+                </form>
+            </div>
+        </div>
+        {% endif %}
+    """), customers=customers, search_query=search_query, selected_customer=selected_customer, appointments=appointments, orders=orders, credit_logs=credit_logs, error=request.args.get("error"), success=request.args.get("success"))
 
 @app.route("/admin/customer/add", methods=["POST"])
 @admin_required
@@ -1532,6 +1617,42 @@ def admin_add_customer():
             except:
                 conn.rollback()
     return redirect(url_for("admin_customers"))
+
+@app.route("/admin/customer/update/<int:id>", methods=["POST"])
+@admin_required
+def admin_customer_update(id):
+    name = (request.form.get("name") or "").strip()
+    phone = (request.form.get("phone") or "").strip()
+    if not name or not phone:
+        return redirect(url_for("admin_customers", id=id, error="姓名和电话都不能为空"))
+    with get_db() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT id FROM customers WHERE phone = %s AND id != %s", (phone, id))
+            if cursor.fetchone():
+                return redirect(url_for("admin_customers", id=id, error="这个电话号码已经属于另一位会员了"))
+            cursor.execute("UPDATE customers SET name = %s, phone = %s WHERE id = %s", (name, phone, id))
+            conn.commit()
+    return redirect(url_for("admin_customers", id=id, success="会员资料已更新"))
+
+@app.route("/admin/customer/credit/<int:id>", methods=["POST"])
+@admin_required
+def admin_customer_add_credit(id):
+    try:
+        amount = round(float(request.form.get("amount", 0) or 0), 2)
+    except ValueError:
+        amount = 0
+    reason = (request.form.get("reason") or "").strip() or "Free credit"
+    if amount <= 0:
+        return redirect(url_for("admin_customers", id=id, error="赠送金额必须大于 0"))
+    with get_db() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute("UPDATE customers SET credits = credits + %s WHERE id = %s", (amount, id))
+            cursor.execute(
+                "INSERT INTO credit_logs (customer_id, amount, reason, created_at) VALUES (%s, %s, %s, %s)",
+                (id, amount, reason, get_current_time())
+            )
+            conn.commit()
+    return redirect(url_for("admin_customers", id=id, success=f"已赠送 RM {amount:.2f} Credit"))
 
 @app.route("/admin/customer/detail/<int:id>")
 @admin_required
@@ -2336,14 +2457,39 @@ def update_order_remark(id):
             conn.commit()
     return redirect(url_for("admin_orders"))
 
+def prepare_receipt_data(order, items):
+    """给单据算好每个项目的原价/折扣，以及汇总数字。旧订单没有原价记录，就当作没折扣。"""
+    items_original = 0.0
+    items_after = 0.0
+    for it in items:
+        price = float(it["price"])
+        orig = it.get("original_price")
+        orig = float(orig) if orig is not None else price
+        if orig < price:
+            orig = price
+        it["orig_display"] = orig
+        it["disc_display"] = round(orig - price, 2)
+        items_original += orig
+        items_after += price
+    order_disc = float(order.get("discount_amount") or 0)
+    adjustment = round(float(order["total_amount"]) - (items_after - order_disc), 2)
+    return {
+        "items_original": round(items_original, 2),
+        "items_discount": round(items_original - items_after, 2),
+        "order_discount": order_disc,
+        "adjustment": adjustment if abs(adjustment) >= 0.01 else 0.0,  # 实收金额手动改过时的差额
+    }
+
 def build_receipt_pdf(order, items):
-    """用 reportlab 生成一份真正的 PDF 收据（不含员工佣金，只显示员工名字）"""
+    """用 reportlab 生成 PDF 收据：每项原价/折扣/折后价，汇总，Remark 放最底（不含员工佣金，只显示员工名字）"""
     from reportlab.lib.pagesizes import A4
     from reportlab.lib import colors
     from reportlab.lib.units import mm
     from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
     from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from xml.sax.saxutils import escape
 
+    summary = prepare_receipt_data(order, items)
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=A4, topMargin=20*mm, bottomMargin=20*mm, leftMargin=20*mm, rightMargin=20*mm)
     styles = getSampleStyleSheet()
@@ -2356,43 +2502,71 @@ def build_receipt_pdf(order, items):
         Spacer(1, 10),
         Paragraph(f"<b>Order No:</b> {order['order_no']}", normal),
         Paragraph(f"<b>Date/Time:</b> {order['created_at']}", normal),
-        Paragraph(f"<b>Customer:</b> {order['customer_name']} ({order['customer_phone']})", normal),
+        Paragraph(f"<b>Customer:</b> {escape(order['customer_name'])} ({order['customer_phone']})", normal),
         Paragraph(f"<b>Payment Method:</b> {order['payment_details']}", normal),
         Paragraph(f"<b>Credit Balance:</b> RM {order.get('customer_credits', 0.0):.2f}", normal),
+        Spacer(1, 14),
     ]
-    if order.get('remark'):
-        elements.append(Paragraph(f"<b>Remark:</b> {order['remark']}", normal))
-    elements.append(Spacer(1, 14))
 
-    table_data = [["Item", "Staff", "Price (RM)"]]
-    subtotal = 0.0
+    table_data = [["Item", "Staff", "Original", "Discount", "Price"]]
     for item in items:
         staff_names = ", ".join(c["staff_name"] for c in item.get("collaborators", [])) or (item.get("staff_name") or "-")
-        table_data.append([item["item_name"], staff_names, f"{item['price']:.2f}"])
-        subtotal += item["price"]
-    discount_amt = order.get("discount_amount") or 0
-    if discount_amt > 0:
-        discount_type = order.get("discount_type") or "percent"
-        if discount_type == "fixed":
-            label = "Discount (fixed)"
-        else:
-            label = f"Discount ({(order.get('discount_percent') or 0):.1f}%)"
-        table_data.append(["", "Subtotal", f"RM {subtotal:.2f}"])
-        table_data.append(["", label, f"- RM {discount_amt:.2f}"])
-    table_data.append(["", "Total", f"RM {order['total_amount']:.2f}"])
-
-    tbl = Table(table_data, colWidths=[70*mm, 60*mm, 30*mm])
+        disc = item["disc_display"]
+        table_data.append([
+            item["item_name"], staff_names,
+            f"{item['orig_display']:.2f}",
+            f"-{disc:.2f}" if disc > 0 else "-",
+            f"{item['price']:.2f}",
+        ])
+    tbl = Table(table_data, colWidths=[55*mm, 40*mm, 25*mm, 25*mm, 25*mm])
     tbl.setStyle(TableStyle([
         ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#f3f4f6')),
         ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-        ('LINEBELOW', (0, 0), (-1, 0), 0.5, colors.grey),
-        ('LINEBELOW', (0, -2), (-1, -2), 0.5, colors.grey),
-        ('FONTNAME', (0, -1), (-1, -1), 'Helvetica-Bold'),
-        ('ALIGN', (2, 0), (2, -1), 'RIGHT'),
+        ('LINEBELOW', (0, 0), (-1, -1), 0.25, colors.lightgrey),
+        ('ALIGN', (2, 0), (-1, -1), 'RIGHT'),
+        ('TEXTCOLOR', (3, 1), (3, -1), colors.HexColor('#dc2626')),
         ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
         ('TOPPADDING', (0, 0), (-1, -1), 6),
     ]))
     elements.append(tbl)
+    elements.append(Spacer(1, 10))
+
+    rows = [["Original Total", f"RM {summary['items_original']:.2f}"]]
+    if summary["items_discount"] > 0:
+        rows.append(["Item Discounts", f"- RM {summary['items_discount']:.2f}"])
+    if summary["order_discount"] > 0:
+        label = "Order Discount"
+        if (order.get("discount_type") or "percent") != "fixed":
+            label += f" ({(order.get('discount_percent') or 0):.1f}%)"
+        rows.append([label, f"- RM {summary['order_discount']:.2f}"])
+    if summary["adjustment"]:
+        sign = "+" if summary["adjustment"] > 0 else "-"
+        rows.append(["Adjustment", f"{sign} RM {abs(summary['adjustment']):.2f}"])
+    rows.append(["Total", f"RM {order['total_amount']:.2f}"])
+    sum_tbl = Table(rows, colWidths=[120*mm, 50*mm])
+    sum_tbl.setStyle(TableStyle([
+        ('ALIGN', (0, 0), (-1, -1), 'RIGHT'),
+        ('FONTNAME', (0, -1), (-1, -1), 'Helvetica-Bold'),
+        ('FONTSIZE', (0, -1), (-1, -1), 12),
+        ('LINEABOVE', (0, -1), (-1, -1), 0.8, colors.black),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+        ('TOPPADDING', (0, 0), (-1, -1), 4),
+    ]))
+    elements.append(sum_tbl)
+
+    # Remark 放在最底部，单独一个框，不挤在顶部信息里
+    if order.get('remark'):
+        elements.append(Spacer(1, 18))
+        remark_tbl = Table([[Paragraph(f"<b>Remark:</b> {escape(order['remark'])}", normal)]], colWidths=[170*mm])
+        remark_tbl.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, -1), colors.HexColor('#fffbeb')),
+            ('BOX', (0, 0), (-1, -1), 0.5, colors.HexColor('#fde68a')),
+            ('LEFTPADDING', (0, 0), (-1, -1), 8),
+            ('TOPPADDING', (0, 0), (-1, -1), 6),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+        ]))
+        elements.append(remark_tbl)
+
     elements.append(Spacer(1, 20))
     elements.append(Paragraph("Thank you for visiting us! Hope to see you again soon.", normal))
 
@@ -2440,30 +2614,46 @@ def admin_order_whatsapp(id):
                 return "Order not found", 404
             cursor.execute("SELECT * FROM order_items WHERE order_id = %s", (id,))
             items = cursor.fetchall()
-        
-    items_str = "\n".join([f"- {item['item_name']}: RM {item['price']:.2f}" for item in items])
+
+    summary = prepare_receipt_data(order, items)
+    lines = []
+    for item in items:
+        if item["disc_display"] > 0:
+            lines.append(f"- {item['item_name']}: RM {item['orig_display']:.2f} → RM {item['price']:.2f} (-RM {item['disc_display']:.2f})")
+        else:
+            lines.append(f"- {item['item_name']}: RM {item['price']:.2f}")
+    items_str = "\n".join(lines)
+
+    sum_str = f"Original Total: RM {summary['items_original']:.2f}\n"
+    if summary["items_discount"] > 0:
+        sum_str += f"Item Discounts: -RM {summary['items_discount']:.2f}\n"
+    if summary["order_discount"] > 0:
+        sum_str += f"Order Discount: -RM {summary['order_discount']:.2f}\n"
+    if summary["adjustment"]:
+        sum_str += f"Adjustment: {'+' if summary['adjustment'] > 0 else '-'}RM {abs(summary['adjustment']):.2f}\n"
+
     receipt_link = request.host_url.rstrip('/') + f"/receipt/{order['customer_token']}/{order['id']}"
-    
     msg = (
         f"🌟 *Dew Hair Salon - Official Invoice* 🌟\n\n"
         f"Hello *{order['customer_name']}*,\n"
         f"Thank you for visiting us! Here's your receipt:\n\n"
         f"🧾 *Order No:* {order['order_no']}\n"
-        f"📅 *Date:* {order['created_at']}\n\n"
+        f"📅 *Date:* {order['created_at']}\n"
+        f"💳 *Payment:* {order['payment_details']}\n\n"
         f"*Purchased Items:*\n{items_str}\n\n"
+        f"{sum_str}"
         f"💰 *Total Amount:* RM {order['total_amount']:.2f}\n"
-        f"💳 *Payment Method:* {order['payment_details']}\n"
         f"💎 *Credit Balance:* RM {order['customer_credits']:.2f}\n"
     )
     if order['remark']:
-        msg += f"📝 *Remark:* {order['remark']}\n"
-        
+        msg += f"\n📝 *Remark:* {order['remark']}\n"
+
     msg += f"\n📄 *Download your PDF Receipt here:*\n{receipt_link}\n\nHope to see you again soon!"
-    
+
     phone = "".join(filter(str.isdigit, order['customer_phone']))
     if phone.startswith('0'):
-        phone = '6' + phone  
-        
+        phone = '6' + phone
+
     wa_url = f"https://api.whatsapp.com/send?phone={phone}&text={urllib.parse.quote(msg)}"
     return redirect(wa_url)
 
@@ -2483,66 +2673,87 @@ def admin_order_invoice(id):
             for item in items:
                 cursor.execute("SELECT staff_name, commission_amount FROM order_item_staff WHERE order_item_id = %s", (item["id"],))
                 item["collaborators"] = cursor.fetchall()
-        
+    summary = prepare_receipt_data(order, items)
+
     return render_template_string("""
-        <div style="max-width:550px;margin:40px auto;padding:25px;border:1px solid #ccc;font-family:sans-serif;border-radius:8px;background:#fff;box-shadow:0 2px 8px rgba(0,0,0,0.1);">
-            <div style="display:flex;justify-content:space-between;align-items:center;border-bottom:2px solid #4f46e5;padding-bottom:10px;margin-bottom:15px;">
+        <div style="max-width:600px;margin:40px auto;padding:28px;border:1px solid #ccc;font-family:sans-serif;border-radius:8px;background:#fff;box-shadow:0 2px 8px rgba(0,0,0,0.1);">
+            <div style="display:flex;justify-content:space-between;align-items:center;border-bottom:2px solid #4f46e5;padding-bottom:10px;margin-bottom:16px;">
                 <h2 style="color:#4f46e5;margin:0;">Dew Hair Salon - Invoice</h2>
                 <span style="font-size:14px;font-weight:bold;color:{% if order.status == 'VOID' %}red{% else %}green{% endif %};">{{ order.status }}</span>
             </div>
-            <p><strong>Order No:</strong> {{ order.order_no }}</p>
-            <p><strong>Date/Time:</strong> {{ order.created_at }}</p>
-            <p><strong>Customer:</strong> {{ order.customer_name }} ({{ order.customer_phone }})</p>
-            <p><strong>Payment Method:</strong> {{ order.payment_details }}</p>
-            <p><strong>Credit Balance:</strong> <span style="color:#16a34a;font-weight:bold;">RM {{ "%.2f"|format(order.customer_credits) }}</span></p>
-            {% if order.remark %}<p><strong>Remark:</strong> <span style="color:#d97706;">{{ order.remark }}</span></p>{% endif %}
-            <hr style="border:0;border-top:1px solid #eee;margin:15px 0;">
-            <h3 style="font-size:16px;margin-bottom:8px;">Items Purchased</h3>
-            <table style="width:100%;border-collapse:collapse;font-size:14px;margin-bottom:15px;">
+
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px 20px;font-size:13px;margin-bottom:22px;">
+                <div><div style="color:#9ca3af;font-size:11px;">Order No</div><div style="font-weight:bold;">{{ order.order_no }}</div></div>
+                <div><div style="color:#9ca3af;font-size:11px;">Date / Time</div><div style="font-weight:bold;">{{ order.created_at }}</div></div>
+                <div><div style="color:#9ca3af;font-size:11px;">Customer</div><div style="font-weight:bold;">{{ order.customer_name }} ({{ order.customer_phone }})</div></div>
+                <div><div style="color:#9ca3af;font-size:11px;">Payment Method</div><div style="font-weight:bold;">{{ order.payment_details }}</div></div>
+                <div><div style="color:#9ca3af;font-size:11px;">Credit Balance</div><div style="font-weight:bold;color:#16a34a;">RM {{ "%.2f"|format(order.customer_credits) }}</div></div>
+            </div>
+
+            <h3 style="font-size:15px;margin:0 0 8px;">Items Purchased</h3>
+            <table style="width:100%;border-collapse:collapse;font-size:13px;margin-bottom:16px;">
                 <thead>
                     <tr style="border-bottom:1px solid #ddd;background:#f9fafb;">
-                        <th style="text-align:left;padding:6px;">Item Name</th>
-                        <th style="text-align:left;padding:6px;">Staff</th>
-                        <th style="text-align:right;padding:6px;">Price</th>
+                        <th style="text-align:left;padding:7px;">Item</th>
+                        <th style="text-align:left;padding:7px;">Staff</th>
+                        <th style="text-align:right;padding:7px;">Original</th>
+                        <th style="text-align:right;padding:7px;">Discount</th>
+                        <th style="text-align:right;padding:7px;">Price</th>
                     </tr>
                 </thead>
                 <tbody>
                     {% for item in items %}
                     <tr style="border-bottom:1px solid #eee;">
-                        <td style="padding:6px;">{{ item.item_name }}</td>
-                        <td style="padding:6px;color:#4f46e5;">
-                            {% if item.collaborators %}
-                                {% for c in item.collaborators %}
-                                    <div>{{ c.staff_name }}</div>
-                                {% endfor %}
-                            {% elif item.staff_name %}
-                                <div>{{ item.staff_name }}</div>
+                        <td style="padding:7px;">{{ item.item_name }}</td>
+                        <td style="padding:7px;color:#4f46e5;">
+                            {% if item.collaborators %}{% for c in item.collaborators %}<div>{{ c.staff_name }}</div>{% endfor %}
+                            {% elif item.staff_name %}<div>{{ item.staff_name }}</div>
                             {% else %}-{% endif %}
                         </td>
-                        <td style="text-align:right;padding:6px;">
-                            RM {{ "%.2f"|format(item.price) }}
+                        <td style="text-align:right;padding:7px;color:#6b7280;">{{ "%.2f"|format(item.orig_display) }}</td>
+                        <td style="text-align:right;padding:7px;color:#dc2626;">
+                            {% if item.disc_display > 0 %}-{{ "%.2f"|format(item.disc_display) }}
+                            <div style="font-size:10px;">({{ "%.0f"|format(item.disc_display / item.orig_display * 100) }}% off)</div>
+                            {% else %}-{% endif %}
                         </td>
+                        <td style="text-align:right;padding:7px;font-weight:bold;">{{ "%.2f"|format(item.price) }}</td>
                     </tr>
                     {% endfor %}
                 </tbody>
             </table>
-            <div style="text-align:right;margin-bottom:20px;">
-                {% if order.discount_amount and order.discount_amount > 0 %}
-                <div style="font-size:13px;color:#dc2626;margin-bottom:4px;">
-                    {% if order.discount_type == 'fixed' %}Discount applied: RM {{ "%.2f"|format(order.discount_amount) }} off
-                    {% else %}Discount applied: {{ "%.1f"|format(order.discount_percent) }}% (- RM {{ "%.2f"|format(order.discount_amount) }})
-                    {% endif %}
+
+            <div style="margin-left:auto;max-width:300px;font-size:14px;margin-bottom:22px;">
+                <div style="display:flex;justify-content:space-between;padding:3px 0;color:#6b7280;"><span>Original Total</span><span>RM {{ "%.2f"|format(summary.items_original) }}</span></div>
+                {% if summary.items_discount > 0 %}
+                <div style="display:flex;justify-content:space-between;padding:3px 0;color:#dc2626;"><span>Item Discounts</span><span>- RM {{ "%.2f"|format(summary.items_discount) }}</span></div>
+                {% endif %}
+                {% if summary.order_discount > 0 %}
+                <div style="display:flex;justify-content:space-between;padding:3px 0;color:#dc2626;">
+                    <span>Order Discount{% if order.discount_type != 'fixed' %} ({{ "%.1f"|format(order.discount_percent or 0) }}%){% endif %}</span>
+                    <span>- RM {{ "%.2f"|format(summary.order_discount) }}</span>
                 </div>
                 {% endif %}
-                <div style="font-size:18px;font-weight:bold;">Total Amount: <span style="color:#dc2626;">RM {{ "%.2f"|format(order.total_amount) }}</span></div>
+                {% if summary.adjustment != 0 %}
+                <div style="display:flex;justify-content:space-between;padding:3px 0;color:#d97706;"><span>Adjustment</span><span>{{ '+' if summary.adjustment > 0 else '-' }} RM {{ "%.2f"|format(summary.adjustment|abs) }}</span></div>
+                {% endif %}
+                <div style="display:flex;justify-content:space-between;border-top:2px solid #111;margin-top:6px;padding-top:8px;font-size:18px;font-weight:bold;">
+                    <span>Total</span><span style="color:#dc2626;">RM {{ "%.2f"|format(order.total_amount) }}</span>
+                </div>
             </div>
+
+            {% if order.remark %}
+            <div style="background:#fffbeb;border:1px solid #fde68a;border-radius:6px;padding:10px 12px;font-size:13px;color:#92400e;margin-bottom:22px;">
+                <div style="font-size:11px;color:#b45309;margin-bottom:2px;">Remark</div>{{ order.remark }}
+            </div>
+            {% endif %}
+
             <div style="display:flex;gap:10px;flex-wrap:wrap;">
                 <a href="/receipt/{{ order.customer_token }}/{{ order.id }}" target="_blank" style="flex:1;text-align:center;padding:12px;background:#dc2626;color:white;text-decoration:none;border-radius:6px;font-weight:bold;">📄 查看真正的 PDF 收据</a>
                 <a href="/admin/order/whatsapp/{{ order.id }}" target="_blank" style="flex:1;text-align:center;padding:12px;background:#25d366;color:white;text-decoration:none;border-radius:6px;font-weight:bold;">💬 发送 WhatsApp</a>
                 <a href="/admin/orders" style="padding:12px 15px;background:#4f46e5;color:white;text-decoration:none;border-radius:6px;font-weight:bold;">返回</a>
             </div>
         </div>
-    """, order=order, items=items)
+    """, order=order, items=items, summary=summary)
 
 @app.route("/admin/order/void/<int:id>")
 @admin_required
@@ -2957,14 +3168,22 @@ def admin_pos():
                 <p id="modal_item_name" class="text-sm font-medium text-gray-700 mb-3"></p>
 
                 <div class="mb-4 bg-amber-50 border border-amber-100 rounded-lg p-3">
-                    <div class="flex items-center justify-between mb-1">
-                        <label class="text-xs font-bold text-gray-700">这个项目的价格（可单独改，比如打折/调价）</label>
+                    <div class="flex items-center justify-between mb-2">
+                        <label class="text-xs font-bold text-gray-700">这个项目的折扣</label>
                         <span class="text-[10px] text-gray-400">原价 RM <span id="modal_original_price">0.00</span></span>
                     </div>
-                    <div class="flex items-center gap-1">
-                        <span class="text-amber-700 font-bold text-sm">RM</span>
-                        <input type="number" id="modal_item_price" step="0.01" min="0" oninput="onItemPriceEdited()" class="w-28 border-2 border-amber-200 rounded-lg p-1.5 text-right font-bold text-amber-700">
-                        <button type="button" onclick="resetItemPrice()" class="text-xs text-indigo-600 underline font-bold ml-1">恢复原价</button>
+                    <div class="flex items-center gap-2 mb-2">
+                        <select id="modal_disc_type" onchange="onItemDiscountEdited()" class="border border-amber-200 rounded-lg p-1.5 text-sm">
+                            <option value="percent">%</option>
+                            <option value="fixed">RM</option>
+                        </select>
+                        <input type="number" id="modal_disc_value" min="0" step="0.01" value="0" oninput="onItemDiscountEdited()" class="w-24 border-2 border-amber-200 rounded-lg p-1.5 text-right font-bold text-amber-700">
+                        <button type="button" onclick="resetItemDiscount()" class="text-xs text-indigo-600 underline font-bold">清除折扣</button>
+                    </div>
+                    <div class="flex items-center gap-1 text-sm">
+                        <span class="text-gray-600 font-semibold">折后价 RM</span>
+                        <input type="number" id="modal_item_price" step="0.01" min="0" onchange="onItemPriceEdited()" class="w-28 border border-gray-200 rounded-lg p-1.5 text-right font-bold">
+                        <span class="text-[10px] text-gray-400">（也可直接改折后价）</span>
                     </div>
                 </div>
 
@@ -3127,7 +3346,7 @@ def admin_pos():
             }
 
             function addToOrder(name, price) {
-                cart.push({name, price, original_price: price, collaborators: []});
+                cart.push({name, price, original_price: price, disc_type: 'percent', disc_value: 0, collaborators: []});
                 renderCart();
             }
 
@@ -3141,12 +3360,34 @@ def admin_pos():
                 return st.commission_value;
             }
 
+            // 根据项目的折扣类型/数值，算出折后价（item.price 永远是折后价，original_price 是原价）
+            function applyItemDiscount(item) {
+                const orig = item.original_price;
+                let v = parseFloat(item.disc_value) || 0;
+                if (v < 0) v = 0;
+                let disc;
+                if (item.disc_type === 'percent') { if (v > 100) v = 100; disc = orig * v / 100; }
+                else { if (v > orig) v = orig; disc = v; }
+                item.disc_value = v;
+                item.price = Math.round((orig - disc) * 100) / 100;
+            }
+
+            function recalcCollaboratorCommissions(item) {
+                (item.collaborators || []).forEach(c => {
+                    if (c.staff) c.commission = calcSuggestedCommission(c.staff, item.price);
+                });
+                renderCollaboratorRows(item.collaborators || []);
+            }
+
             function openStaffModal(index) {
                 editingIndex = index;
                 const item = cart[index];
                 if (item.original_price === undefined) item.original_price = item.price;
+                if (!item.disc_type) { item.disc_type = 'percent'; item.disc_value = 0; }
                 document.getElementById('modal_item_name').innerText = "项目: " + item.name;
                 document.getElementById('modal_original_price').innerText = item.original_price.toFixed(2);
+                document.getElementById('modal_disc_type').value = item.disc_type;
+                document.getElementById('modal_disc_value').value = item.disc_value || 0;
                 document.getElementById('modal_item_price').value = item.price.toFixed(2);
                 if (!item.collaborators || item.collaborators.length === 0) {
                     item.collaborators = [{staff: '', commission: 0}];
@@ -3155,24 +3396,42 @@ def admin_pos():
                 document.getElementById('staffModal').classList.remove('hidden');
             }
 
+            function onItemDiscountEdited() {
+                const item = cart[editingIndex];
+                if (!item) return;
+                item.disc_type = document.getElementById('modal_disc_type').value;
+                item.disc_value = parseFloat(document.getElementById('modal_disc_value').value) || 0;
+                applyItemDiscount(item);
+                document.getElementById('modal_item_price').value = item.price.toFixed(2);
+                recalcCollaboratorCommissions(item);
+            }
+
+            // 直接改折后价 → 自动换算成「RM 固定折扣」
             function onItemPriceEdited() {
                 const item = cart[editingIndex];
                 if (!item) return;
-                let newPrice = parseFloat(document.getElementById('modal_item_price').value);
-                if (isNaN(newPrice) || newPrice < 0) newPrice = 0;
-                item.price = newPrice;
-                // 价格改了之后，已经选好的协作员工佣金按新的价格重新算一次建议金额
-                (item.collaborators || []).forEach(c => {
-                    if (c.staff) c.commission = calcSuggestedCommission(c.staff, item.price);
-                });
-                renderCollaboratorRows(item.collaborators || []);
+                let p = parseFloat(document.getElementById('modal_item_price').value);
+                if (isNaN(p) || p < 0) p = 0;
+                if (p > item.original_price) p = item.original_price;
+                item.disc_type = 'fixed';
+                item.disc_value = Math.round((item.original_price - p) * 100) / 100;
+                applyItemDiscount(item);
+                document.getElementById('modal_disc_type').value = 'fixed';
+                document.getElementById('modal_disc_value').value = item.disc_value;
+                document.getElementById('modal_item_price').value = item.price.toFixed(2);
+                recalcCollaboratorCommissions(item);
             }
-            function resetItemPrice() {
+
+            function resetItemDiscount() {
                 const item = cart[editingIndex];
                 if (!item) return;
-                item.price = item.original_price;
+                item.disc_type = 'percent';
+                item.disc_value = 0;
+                document.getElementById('modal_disc_type').value = 'percent';
+                document.getElementById('modal_disc_value').value = 0;
+                applyItemDiscount(item);
                 document.getElementById('modal_item_price').value = item.price.toFixed(2);
-                onItemPriceEdited();
+                recalcCollaboratorCommissions(item);
             }
 
             function renderCollaboratorRows(collaborators) {
@@ -3441,10 +3700,13 @@ def checkout():
                     total_item_commission = sum(float(c.get("commission", 0) or 0) for c in collaborators)
                     primary_staff = ", ".join(c["staff"] for c in collaborators if c.get("staff")) if collaborators else ""
 
+                    # 单项目折扣：记下原价和折扣金额，单据上才能显示「这个项目原价多少、折了多少」
+                    orig_price = float(item.get("original_price") or item["price"])
+                    item_discount = max(0.0, round(orig_price - float(item["price"]), 2))
                     cursor.execute("""
-                        INSERT INTO order_items (order_id, item_name, price, staff_name, commission) 
-                        VALUES (%s, %s, %s, %s, %s) RETURNING id
-                    """, (order_id, item["name"], item["price"], primary_staff, total_item_commission))
+                        INSERT INTO order_items (order_id, item_name, price, original_price, item_discount, staff_name, commission) 
+                        VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id
+                    """, (order_id, item["name"], item["price"], orig_price, item_discount, primary_staff, total_item_commission))
                     order_item_id = cursor.fetchone()["id"]
 
                     for c in collaborators:
